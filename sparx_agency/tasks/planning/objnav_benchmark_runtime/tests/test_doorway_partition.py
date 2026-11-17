@@ -121,8 +121,9 @@ def test_a_sightline_to_an_open_rooms_own_frontier_adds_no_threshold_and_a_detec
 
 
 def test_the_graphs_edges_name_each_rooms_neighbours_by_type_and_the_oracles_node_carries_them():
-    """``connections()`` -- what the oracle's ``connected to:`` is made of: the types of the rooms a door or a
-    threshold joins a room to. A type and nothing of where: adjacency is in the scene graph, distance is RPT*'s."""
+    """``connections()`` -- the types of the rooms a door or a threshold joins a room to. A type and nothing of
+    where: adjacency is in the scene graph, distance is RPT*'s. The node carries them for the record; since
+    2026-11-17 its prompt line does not (which rooms a room is joined to is the planner's, with the distances)."""
     from types import SimpleNamespace
     from sparx_agency.core.mapping.topology.search_node_oracle import format_node
     world = glimpsed_world()
@@ -138,17 +139,18 @@ def test_the_graphs_edges_name_each_rooms_neighbours_by_type_and_the_oracles_nod
     nodes = {node.id: node for node in graph.nodes(world, step=2, here_xy=IN_ROOM)}
     assert nodes[room].connected == ("hallway?",) and nodes[beyond].connected == ("bedroom",)
     line = format_node(nodes[room])
-    assert "connected to: hallway?" in line
+    assert "connected to" not in line and "hallway" not in line, "on the node, not on its line"
     assert "here" not in line and "%.1f" % IN_ROOM[0] not in line, "the room the agent stands in is not marked: that is distance"
     # An edge to a room the registry no longer holds (a merge) names nothing.
     graph.doors.append({"index": 9, "kind": "door", "room_pairs": [[room, 99]]})
     assert graph.connections() == {room: ["hallway?"], beyond: ["bedroom"]}
 
 
-def test_a_room_holding_a_confirmed_object_of_the_targets_own_kind_is_marked_and_the_oracle_is_told():
-    """``target_seen`` -- what lets the oracle's prompt say the covered floor was looked at WITHOUT finding the
-    target: a room whose confirmed objects include one of the target's own kind (found, let go by the closing, the
-    search still on) says so on its line; every other room says nothing; without the target the mark is unknown."""
+def test_a_room_holding_a_confirmed_object_of_the_targets_own_kind_is_marked_on_its_node():
+    """``target_seen`` -- a room whose confirmed objects include one of the target's own kind (found, let go by
+    the closing, the search still on) is marked on its node; every other room is not; without the target the mark
+    is unknown. Until 2026-11-17 the mark was also on the room's prompt line (``target: detected here, not
+    reached``); the line now holds four things and this is not one of them -- the record keeps it."""
     from types import SimpleNamespace
     world = glimpsed_world()
     graph, target = graph_on(world)                                # the target is a toilet
@@ -159,8 +161,8 @@ def test_a_room_holding_a_confirmed_object_of_the_targets_own_kind_is_marked_and
     room, beyond = graph.room_at(world, IN_ROOM), graph.room_at(world, IN_SLIVER)
     marked = {node.id: node for node in graph.nodes(world, step=2, target=target)}
     assert marked[room].target_seen is False and marked[beyond].target_seen is True
-    assert "target:" not in format_line(marked[room]) and format_line(marked[beyond]).endswith(
-        "seen: toilet  target: detected here, not reached")
+    assert "target:" not in format_line(marked[room]) and "target:" not in format_line(marked[beyond])
+    assert "toilet" not in format_line(marked[room]), "nor do the objects of another room leak onto a line"
     assert all(node.target_seen is None for node in graph.nodes(world, step=2)), "no target given: not known, not said"
     other = gibson_label_mapper().target_labels("bed")
     assert not any(node.target_seen for node in graph.nodes(world, step=2, target=other)), "another target's kind is no mark"

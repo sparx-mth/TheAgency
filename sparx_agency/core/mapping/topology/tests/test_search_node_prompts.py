@@ -38,10 +38,12 @@ ROOM_WORDS = tuple(sorted({str(label).replace("_", " ") for label in DEFAULT_LAB
 #: of ``p`` (twice: its range and its two ends), and "need not sum to 100". Anything else is a value we chose.
 ALLOWED_NUMBERS = {"0", "100", "12", "20", "25"}
 
-FULL = SearchNode(3, ROOM, "bedroom", tentative=True, footprint_m2=9.0, length_m=3.5, width_m=3.0, length_final=False,
-                  walls_seen=3, bounded=False, covered_fraction=0.44, covered_m2=4.0, left_m2=5.0, open_perimeter_m=2.2,
-                  frontier_clusters=1, exits=1, doorways=1, unseen_m2=12.0, objects=("bed",), connected=("hallway",),
-                  glimpsed=("sink",), searched_s=12.0, last_inside_ago_s=3.0, target_seen=False)
+#: A room with every attribute the scene graph stores set: its line still carries four things.
+FULL = SearchNode(3, ROOM, "bedroom", tentative=True, area_m2=8.0, footprint_m2=9.0, length_m=3.5, width_m=3.0,
+                  length_final=False, walls_seen=3, bounded=False, covered_fraction=0.44, covered_m2=4.0, left_m2=5.0,
+                  observed_m2=3.3, open_perimeter_m=2.2, frontier_clusters=1, exits=1, doorways=1, unseen_m2=12.0,
+                  objects=("bed",), connected=("hallway",), glimpsed=("sink",), searched_s=12.0, last_inside_ago_s=3.0,
+                  target_seen=True)
 
 
 def words_in(text, words):
@@ -129,8 +131,10 @@ def test_the_oracle_sends_the_version_it_was_given_and_the_default_otherwise():
 @pytest.mark.parametrize("name", VERSIONS)
 def test_a_version_tells_the_model_to_use_its_own_knowledge_of_homes_and_buildings(name):
     """The principle (2026-11-16): the model works out by itself where the object makes sense and derives each
-    node's probability from that. Every version says so in so many words."""
+    node's probability from that. Every version says so in so many words, and opens with whose judgement is
+    wanted: a person's who knows how homes are laid out (2026-11-17)."""
     flat = " ".join(PROMPTS[name].system.split())
+    assert flat.startswith("You reason like a person who knows how homes are laid out. ")
     for phrase in ("your own reasoning and your own knowledge of standard homes and buildings",
                    "in which rooms furniture and objects of each kind are normally found",
                    "the judgement is yours", "The TARGET line names it", "probability, in percent"):
@@ -142,7 +146,8 @@ def test_a_version_tells_the_model_to_use_its_own_knowledge_of_homes_and_buildin
 def test_a_version_holds_no_category_knowledge_no_number_of_ours_and_no_rule(name):
     """No object named, no room type named, no probability or band, no list of a benchmark's categories, no worked
     example, none of the old prompt's rules. Until 2026-11-16 the prompt listed the rooms of each HM3D goal
-    category, the rooms a typical home has and a band of numbers per room status."""
+    category, the rooms a typical home has and a band of numbers per room status. What a version may say since
+    2026-11-17 is what the search so far MEANS for a room -- in words, with no number (the test below)."""
     version = PROMPTS[name]
     for label, text in (("the system prompt", version.system), ("the openings supplement", version.openings_supplement),
                         ("the user template", version.user_template)):
@@ -187,18 +192,42 @@ def test_a_version_asks_for_the_reply_the_parser_reads_and_frames_the_query_with
 
 @pytest.mark.parametrize("name", VERSIONS)
 def test_a_version_explains_every_field_a_line_carries_and_nothing_the_code_does_not_write(name):
+    """A room line holds four things (2026-11-17) -- its type, the floor mapped out of its floor, the frontiers
+    left, the actions spent inside -- and the legend has one entry for each and none for anything else."""
     system = PROMPTS[name].system
     line = format_node(FULL, 1.0)
+    assert line == "id=3  ROOM  type=bedroom?  mapped=3.3 of 8.0 m2 (40%)  frontier=1  searched=10 actions"
     on_line = sorted(set(re.findall(r"  ([a-z_]+)=", line)))
     in_legend = sorted(set(key[:-1] for key in re.findall(r"(?m)^([a-z_]+=)", system)))
-    assert on_line == in_legend, "every key on a room line has its line in the legend, and the legend no other"
-    for label in ("connected to:", "seen:", "glimpsed through its exits:", "HOUSE"):
-        assert label in system, label
-    for word in ('"?"', '"all sides mapped"', '"at least"', '"+"', '"open edge"', "never_entered", "entered",
-                 "scanned(<how>, <how long ago>)", '"xN"', '"+N more"'):
+    assert on_line == in_legend == ["frontier", "mapped", "searched", "type"], (
+        "every key on a room line has its line in the legend, and the legend no other")
+    for word in ("HOUSE", '"?"', '"unknown"', '"xN"', '"never"', "square metres", "percentage"):
         assert word in system, word
+    for gone in ("size=", "covered=", "exits=", "status=", "connected to", "glimpsed", "all sides mapped", "open edge",
+                 "never_entered", "detected here"):
+        assert gone not in system and gone not in line, "%s left the line on 2026-11-17, and the legend with it" % gone
+
+
+@pytest.mark.parametrize("name", VERSIONS)
+def test_a_version_says_what_the_search_so_far_means_in_words_and_without_a_number(name):
+    """Items 3 and 4 of the task of 2026-11-17: the more of a room is mapped and the more actions were spent
+    searching it, the less of it is left to hold the target -- its unmapped floor and what lies behind its
+    frontiers; a room never entered has not been searched and grows likelier as the others are searched; a
+    room's number is about the target being IN the room, not about walking through it. Said as what the data
+    means -- no number, no threshold, no room, no object."""
+    flat = " ".join(PROMPTS[name].system.split())
+    block = flat.split("What the search so far means:")[1].split("Judge every node on its own")[0]
+    for idea in ("The more of a room is mapped and the more actions were spent searching it",
+                 "the less of it is left to hold the target", "floor not mapped yet", "behind its frontiers",
+                 "A room never entered has not been searched", "all of it can still hold the target",
+                 "The more the other rooms have been searched",
+                 "the more likely the target is in a room not entered yet",
+                 "says only whether the target is in that room", "pass through a searched room"):
+        assert idea in block, idea
+    assert re.findall(r"\d", block) == [], "what the data means, never a value for it"
+    assert words_in(block, OBJECT_WORDS) == [] and words_in(block, ROOM_WORDS) == []
 
 
 @pytest.mark.parametrize("name", VERSIONS)
 def test_a_version_is_short(name):
-    assert len(PROMPTS[name].system) < 3800, "short and to the point: the prompt these replaced was 14,751 characters"
+    assert len(PROMPTS[name].system) < 3300, "short and to the point: the prompt these replaced was 14,751 characters"

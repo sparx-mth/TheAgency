@@ -25,8 +25,8 @@ happens so a recording can be read against this docstring:
   clearance -- turn the camera's circle (as many turns as its field of view
   needs, ten at 30 degrees), and leave; the room is finished whatever
   frontier its mask still shows. Under both, a finished
-  room is still SHOWN to the oracle -- ``status=scanned(<how>, <ago>)`` --
-  but not offered as a node, and -- since 2026-10-14 -- not shown to the
+  room was at first still SHOWN to the oracle (with a ``scanned`` status)
+  but not offered as a node, and is -- since 2026-10-14 -- not shown to the
   oracle as a node either (:attr:`LoopSettings.scanned_to_oracle`; the HOUSE
   line still names its type): one look at a room is the look it gets. With
   :attr:`LoopSettings.second_pass` on (off by default since 2026-10-14) the
@@ -49,20 +49,24 @@ happens so a recording can be read against this docstring:
 * **3. Probability per NODE** -- the same call, to
   :class:`~sparx_agency.core.mapping.topology.search_node_oracle.SearchNodeOracle`:
   for every room on the floor the probability that the target is in it. The
-  model is shown everything the scene graph stores about the room but where
-  it is -- its type or ``unknown``, its size and how much of it the camera
-  has covered, the frontier left, its **exits** (the doorways and gaps at
-  its edge to space not seen yet, how many stand at a seen door frame, the
-  unseen floor behind them and the objects glimpsed through them:
-  :func:`~opening_nodes.room_exits`, the room's attributes since
-  2026-10-21), its status, the actions spent in it, the rooms a door joins
-  it to and the objects seen -- beside the HOUSE line (:mod:`house_context`:
+  model is shown four things about a room (since 2026-11-17; until then,
+  everything the scene graph stores about it but where it is): its type --
+  or ``unknown`` with the objects seen in it -- the floor mapped out of its
+  floor, the frontiers left in it and the actions spent in it (``never``
+  for a room not entered) -- beside the HOUSE line (:mod:`house_context`:
   every room type found so far with its status, the rooms still
   unidentified, the exits not looked into, the action budget spent) and the
-  name of the object this episode searches for. It is told to use its own
-  knowledge of standard homes and buildings and given no rule of judgement:
-  where the target belongs, what an exit promises and what a covered room
-  is worth are its own conclusions (since 2026-11-16). An exit is NOT a
+  name of the object this episode searches for. A room's **exits** (the
+  doorways and gaps at its edge to space not seen yet,
+  :func:`~opening_nodes.room_exits`, the room's attributes since
+  2026-10-21) are still the room's to walk and are kept on its node for the
+  record; the rooms a door joins it to and every distance are the
+  planner's. The model is told to use its own knowledge of standard homes
+  and buildings -- where the target belongs is its own conclusion (since
+  2026-11-16) -- and what the search so far means for a room: floor mapped
+  and actions spent without the target found count against it, a room never
+  entered has not been searched (since 2026-11-17, in words and without a
+  number). An exit is NOT a
   node and gets no number of its own. (Under the deprecated
   ``openings.exits_as_nodes`` every OPENING of the floor not folded into an
   offered room is a node beside the rooms, as the 2026-10-04 design had
@@ -285,10 +289,20 @@ class LoopSettings:
             applied to whatever the model wrote: until 2026-11-16 the prompt
             stated it too (an entered room is worth less than an unexplored
             one of the same type) and this was the backstop for a model
-            that did not listen; the prompt now states no rule of judgement,
-            and this factor and the four below are the hand-set part of a
-            node's value that remains -- between the model's probability
-            and RPT* (``qwen2.5:3b`` valued a bathroom walked
+            that did not listen; for a day the prompt stated nothing of the
+            kind, and since 2026-11-17 it tells the model, in words, that
+            floor mapped and actions spent in a room without the target
+            found count against that room. So a model that listens lowers
+            such a room itself, and this factor and the four below then
+            lower it AGAIN: the same evidence may be counted twice. They
+            were left as they were. Measured on 90 HM3D episodes that day
+            (``core/mapping/topology/README.md``), the model's share is
+            small -- its number for a room entered and left falls by a
+            quarter from a brief visit to a long one, this factor fivefold
+            -- and its high numbers on searched rooms name the target's
+            room one time in eleven. So this stays
+            the hand-set part of a node's value, between the model's
+            probability and RPT* (``qwen2.5:3b`` valued a bathroom walked
             through at 0.6, "known to contain a toilet", over an unknown
             bathroom-sized room never entered at 0.2, and the agent walked
             11 m back to it -- Darden/000034, 2026-10-13). 1 disables.
@@ -322,7 +336,12 @@ class LoopSettings:
             hides. 1 disables.
         unvisited_floor: The least number a never-entered room is read at
             after the boost, 0-1: a node, not a 2 % afterthought, while it
-            has never been stood in. 0 disables.
+            has never been stood in. It holds for a room the model put at
+            zero too (since 2026-11-17): the oracle never hands such a room
+            on at zero (``search_node_oracle.keep_unentered``), so the
+            ``prob > 0`` this floor asks for is met by every never-entered
+            room the model was shown. 0 disables -- and with it that
+            guarantee.
         scan_visit_steps: ``scan`` -- the hard bound on one visit: the walk
             to the vantage point plus the rotation. A visit that overruns it
             is released ``budget_spent``. Also the bound of a second-pass
@@ -387,8 +406,9 @@ class LoopSettings:
             different spot (``revisit_standoff_m``); the room is never
             released as finished on the way in.
         scanned_to_oracle: Show the FINISHED rooms to the oracle as nodes
-            with their ``status=scanned(...)`` (the LLM-first convention of
-            2026-10-07). **Off by default since 2026-10-14:** a finished
+            (the LLM-first convention of 2026-10-07; their line carried a
+            ``scanned`` status until 2026-11-17 and reads like any other
+            room's since). **Off by default since 2026-10-14:** a finished
             room is not a node, so its line buys the model nothing but a
             longer prompt and -- for ``qwen2.5:3b`` -- the ``pass: second``
             confusion; the HOUSE line still names every room type found,
@@ -443,10 +463,10 @@ class LoopSettings:
         openings: The floor's openings -- doorways and gaps to space not
             yet seen (:mod:`opening_nodes`). ``openings.enabled`` is the
             switch. Since 2026-10-21 an exit is an ATTRIBUTE of the room it
-            opens from under ``explore`` -- shown on the room's node line
-            (``exits=2 (1 doorway)``, the objects glimpsed through them),
-            valued by the model only where the room's type fits the
-            target, and walked by the room's own visit
+            opens from under ``explore`` -- kept on the room's node (on
+            its prompt line too until 2026-11-17: ``exits=2 (1 doorway)``,
+            the objects glimpsed through them) and walked by the room's
+            own visit
             (:attr:`room_level_gaps`); ``openings.exits_as_nodes`` is the
             deprecated 2026-10-04 design in which every exit not folded
             into an offered room is a node of its own, valued by the oracle
@@ -1123,7 +1143,7 @@ class RoomSearchLoop:
         a room and the gap at its far end -- and a peek of it is a visit
         the room's own visit makes anyway. Since 2026-10-21 (room-level
         GAPs) EVERY exit is folded: an exit is the attribute of its room
-        (``exits=`` on the room's node line), never a node with a number
+        (counted on the room's node), never a node with a number
         of its own, and an exit off a finished room is what re-offers the
         room for the GAPs left in it (:meth:`_exclusions`); an exit off no
         room is the exploration fallback's. Under the deprecated
@@ -1248,10 +1268,15 @@ class RoomSearchLoop:
         and :attr:`LoopSettings.lingered_discount` instead when the agent
         searched it for :attr:`LoopSettings.lingered_steps` or more with at
         most one significant frontier left in it (as good as scanned). These
-        are the code's rules, applied to whatever the model wrote; since
-        2026-11-16 the prompt states none of them (it states no rule of
-        judgement at all), so they are the one hand-set adjustment left
-        between the model's probability and RPT*. The supervisor filters on the scaled number and
+        are the code's rules, applied to whatever the model wrote: the
+        hand-set adjustment between the model's probability (after the
+        oracle's own check of format, scale and meaning,
+        ``SearchNodeOracle.score``) and RPT*. Since 2026-11-17 the prompt
+        tells the model what they act on -- that floor mapped and actions
+        spent in a room without the target found count against it -- so a
+        searched room may now be lowered twice, once by the model and once
+        here (:attr:`LoopSettings.entered_discount`); neither was changed
+        for it. The supervisor filters on the scaled number and
         RPT* is handed it, so a node scaled under ``min_prob`` is no node,
         as the model's own low number would make it. ``here`` is the pid of
         the room the agent stands in, which is not discounted.
@@ -1531,7 +1556,7 @@ class RoomSearchLoop:
           (:attr:`LoopSettings.second_pass`) finished rooms are offered at
           the oracle's probability -- the model has said the home is covered
           and the detector may have missed the target -- and recorded in
-          :attr:`_finished` either way for the prompt's ``status=``. Under
+          :attr:`_finished` either way for the HOUSE line's status. Under
           ``sweep`` this test stands down: the sweep's own termination rule
           decides when a room is done.
 
@@ -1543,8 +1568,8 @@ class RoomSearchLoop:
         through; a room finished long ago whose edge the map has since
         opened. Its exits are its own attributes now, not nodes that could
         carry the search on for it, so the room itself is offered again for
-        what lies behind them: shown to the oracle as ``status=scanned(...)``
-        with its ``exits=``, entered at its best frontier, priced by its
+        what lies behind them: shown to the oracle like any other room (its
+        frontier count says what is left), entered at its best frontier, priced by its
         frontiers and walked like any other room (:attr:`_reopened`; never
         a second-pass revisit, which is a scan). Only ``scan_point_inside``
         can finish a room with frontier left (the other verdicts need

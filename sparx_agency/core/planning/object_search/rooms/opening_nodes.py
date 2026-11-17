@@ -19,13 +19,12 @@ opens from, whether a door frame was seen there, and the objects glimpsed
 through it.
 
 **Room-level since 2026-10-21.** An exit is an ATTRIBUTE of the room it
-opens from, not a node: the room's line to the oracle carries its exits
-(:func:`room_exits` -> ``SearchNode.exits`` / ``doorways`` / ``glimpsed``,
-rendered ``exits=2 (1 doorway)  glimpsed through its exits: toilet``), the
-model values the room by its type AND what its exits may lead to (a
-bathroom's unlooked door raises it for a toilet; a living room's gaps do
-not), and the room's visit -- the explore visit's frontier walk -- walks the
-exits itself. The global decision is over rooms; the look through a doorway
+opens from, not a node: the room's node carries its exits
+(:func:`room_exits` -> ``SearchNode.exits`` / ``doorways`` / ``glimpsed``;
+its line to the oracle showed them until 2026-11-17 -- ``exits=2 (1
+doorway)  glimpsed through its exits: toilet`` -- and now holds the room's
+type, mapped floor, frontiers and effort alone), and the room's visit --
+the explore visit's frontier walk -- walks the exits itself. The global decision is over rooms; the look through a doorway
 is a step of the room's local exploration. Standalone opening NODES --
 valued by the oracle beside the rooms, offered to RPT* at the threshold and
 visited by a **peek** (walk to the threshold, look in -- straight, one turn
@@ -106,7 +105,7 @@ class OpeningSettings:
     Attributes:
         enabled: Read the floor's openings at all (the default). Off, the
             openings are the exploration fallback's business alone: no
-            room carries an ``exits=`` count and no exit is a node.
+            room carries a count of exits and no exit is a node.
         exits_as_nodes: **Deprecated (2026-10-21).** Offer the floor's
             exits to the oracle and to RPT* as nodes of their own beside
             the rooms, visited by a peek -- the 2026-10-04 design. A
@@ -115,10 +114,9 @@ class OpeningSettings:
             a toilet, while the room-level prior said bathroom. Off (the
             default): under the ``explore`` visit every exit is folded into
             the room it opens from (:meth:`RoomSearchLoop._fold_openings`),
-            the room's node line carries its exits as attributes
-            (``exits=2 (1 doorway)``, the objects glimpsed through them),
-            the model raises a room for its exits only where its type fits
-            the target, and the room's own visit walks the exits; a room
+            the room's node carries its exits as attributes (on its
+            prompt line until 2026-11-17), and the room's own visit walks
+            the exits; a room
             the ledger has finished but with GAPs still left to walk is
             offered again for what lies behind them
             (:attr:`RoomSearchLoop._reopened`). The ``scan`` and ``sweep``

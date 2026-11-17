@@ -148,7 +148,7 @@ class ObservedSceneGraph:
         self.resolved_provider = None
         #: Optional ``world -> (H, W) bool`` naming the free cells the camera has seen
         #: from within detection range (:meth:`~sightlines.SightLedger.observed_mask`),
-        #: per storey and per cell. Each room's share of it is its ``covered=`` figure
+        #: per storey and per cell. Each room's share of it is its ``mapped=`` figure
         #: on the node line. None -- or a provider that has no record -- leaves the
         #: coverage unread: the line then says nothing of it.
         self.observed_provider = None
@@ -466,12 +466,13 @@ class ObservedSceneGraph:
                 unvalued. Empty since the LLM-first loop of 2026-10-07: every
                 room is shown with its status and the model values it.
             scanned: ``{pid: (how, ago_s)}`` -- the rooms the scan ledger has
-                finished, in the prompt's words, and how long ago; rendered
-                as ``status=scanned(<how>, <ago>)`` on the node line.
+                finished, in the prompt's words, and how long ago; kept on
+                the node for the record (its line carried it as
+                ``status=scanned(<how>, <ago>)`` until 2026-11-17).
             exits: ``{pid: RoomExits}`` (:func:`~opening_nodes.room_exits`)
                 -- each room's open exits, how many are doorways and what
-                was glimpsed through them; rendered on the room's line as
-                its attributes (``exits=2 (1 doorway)``), the room-level
+                was glimpsed through them; the room's attributes, kept on
+                its node for the record (on its line until 2026-11-17), the room-level
                 GAP design of 2026-10-21. None reads every room at 0.
         """
         if self.registry.rooms:
@@ -613,9 +614,13 @@ class ObservedSceneGraph:
         count them -- and the types of the rooms a door or a threshold joins
         it to (:meth:`connections`). ``exits`` is ``{pid: RoomExits}`` -- the
         room's open doorways and gaps to unseen space
-        (:func:`~opening_nodes.room_exits`); a room without an entry reads
-        ``exits=0``. ``here`` is recorded on the node and never shown to the
-        model: where the agent stands is distance, and distance is RPT*'s.
+        (:func:`~opening_nodes.room_exits`); a room without an entry has
+        none. Of all this the room's prompt line shows four things -- type,
+        mapped floor, frontiers left, effort spent
+        (``search_node_oracle.format_node``, since 2026-11-17); the rest is
+        on the node for the record. ``here`` is recorded on the node and
+        never shown to the model: where the agent stands is distance, and
+        distance is RPT*'s.
         ``target`` -- the episode's :class:`TargetLabels` -- marks the rooms
         whose confirmed objects include one of the target's own kind
         (``target_seen``: found by the detector, and the search still on);
@@ -654,6 +659,9 @@ class ObservedSceneGraph:
                                   else float(extent.covered_fraction)),
                 covered_m2=0.0 if extent is None else float(extent.covered_m2),
                 left_m2=0.0 if extent is None else float(extent.left_m2),
+                # The line's ``mapped=``: the observed part of the room's free floor (``area_m2`` above) alone --
+                # no furniture island, no settled pocket: floor the robot cannot stand on is not the room's.
+                observed_m2=(None if extent is None or not self._observed_read else float(extent.observed_m2)),
                 open_perimeter_m=0.0 if extent is None else float(extent.open_perimeter_m),
                 connected=tuple(connections.get(pid, ())),
                 target_seen=None if wanted is None else any(str(name) in wanted for name in objects),

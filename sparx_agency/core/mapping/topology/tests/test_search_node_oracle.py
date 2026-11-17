@@ -8,8 +8,8 @@ from sparx_agency.core.mapping.topology.search_node_oracle import (
     OMITTED_PERCENT, OPENING, OPENINGS_SUPPLEMENT, P_CEILING, PASS_FIRST, PASS_SECOND, ROOM, SOURCE_FLAT,
     SOURCE_LLM, SYSTEM_PROMPT, UNEXPLORED_FLOOR, USABLE_SOURCES, USER_PROMPT_TEMPLATE, SearchContext, SearchNode,
     SearchNodeOracle, area_words, budget_line, coarse_duration, coarse_metres, coarse_seconds, counted,
-    floor_unexplored, format_coverage, format_exits, format_node, format_prompt, format_size, kinds, normalise,
-    parse_pass, parse_reply, system_prompt)
+    floor_unexplored, format_coverage, format_exits, format_mapped, format_node, format_prompt, format_size,
+    keep_unentered, kinds, normalise, parse_pass, parse_reply, system_prompt, written_as_fractions)
 from sparx_agency.core.mapping.topology.search_node_prompts import DEFAULT_PROMPT, PROMPTS
 
 
@@ -52,22 +52,25 @@ HOUSE = ("rooms found: kitchen (scanned), living_room (entered); 1 room unidenti
 # -- the prompt: the default version's texts, and what went with the multi-storey supplement ---------------------------
 # What every prompt version must hold to -- the model's own knowledge, no category knowledge, no rule, the reply
 # format, the legend -- is checked over the whole registry in ``test_search_node_prompts.py``.
-def test_the_module_exports_the_default_versions_texts_and_asks_about_the_part_of_a_node_not_checked_yet():
-    """What the one number is: the probability that the target is in the part of the node not checked yet -- the
-    floor of the room that is left, and the unseen space behind its exits. A node is a room together with that
-    space, and the detector has looked at the covered floor without finding the target: facts, said as facts."""
+def test_the_module_exports_the_default_versions_texts_and_asks_whether_the_target_is_in_each_room():
+    """What the one number is (since 2026-11-17): the probability that the target is in the room -- in the part
+    of it the robot has not seen yet, since a detector checks every frame. A node is a room, no longer the room
+    with the unseen space its exits open onto; and what the search so far means for a room is said in words,
+    beside the fields -- facts and their meaning, never a value."""
     default = PROMPTS[DEFAULT_PROMPT]
     assert (SYSTEM_PROMPT, OPENINGS_SUPPLEMENT, USER_PROMPT_TEMPLATE) == (default.system, default.openings_supplement,
                                                                          default.user_template)
     flat = " ".join(SYSTEM_PROMPT.split())
-    for phrase in ("Each line under NODES is one place it can search next: a room, together with the unseen space its "
-                   "exits open onto.",
-                   "A detector looks for the target in every camera frame; on the floor a line lists as covered it has "
-                   "looked and not found it.",
-                   "estimate the probability, in percent, that the target is in the part of it not checked yet: the floor "
-                   "of the room that is left, and the unseen space behind its exits.",
+    for phrase in ("You reason like a person who knows how homes are laid out.",
+                   "Each line under NODES is one room it can search next.",
+                   "A detector checks every camera frame for the target, so the target is in a place the robot has "
+                   "not seen yet.",
+                   "For every node, estimate the probability, in percent, that the target is in the part of that room "
+                   "the robot has not seen yet.",
                    '"p": the probability in percent, from 0 (certain the target is not there) to 100 (certain it is).'):
         assert phrase in flat, phrase
+    for gone in ("together with the unseen space its exits open onto", "the part of it not checked yet"):
+        assert gone not in flat and gone not in USER_PROMPT_TEMPLATE, gone
 
 
 def test_the_multi_storey_supplement_and_everything_it_asked_for_are_gone():
@@ -93,7 +96,7 @@ def test_travel_is_the_planners_and_nothing_on_a_line_says_where_the_robot_is():
     assert format_node(LIVING) == format_node(SearchNode(1, ROOM, "living_room", area_m2=25.0, frontier_clusters=1,
                                                          searched_s=20.0, last_inside_ago_s=0.0,
                                                          objects=("sofa", "television"))), "standing in it changes nothing"
-    # Nor does how long ago the robot left a room: it is read for the status word alone.
+    # Nor does how long ago the robot left a room: it is read only for whether the room was ever entered.
     assert format_node(LIVING) == format_node(SearchNode(1, ROOM, "living_room", area_m2=25.0, frontier_clusters=1,
                                                          searched_s=20.0, last_inside_ago_s=400.0,
                                                          objects=("sofa", "television")))
@@ -115,22 +118,32 @@ def test_every_call_names_the_object_the_episode_searches_for():
     assert format_prompt("bed", [KITCHEN]).startswith("TARGET: bed\n\nHOUSE: nothing known yet\n")
     # The question is asked again where a small model reads last: after the node lines, with the target's name.
     assert format_prompt("bed", [KITCHEN]).endswith(
-        "\n\nFor each of the 1 nodes: how likely is it that the target (bed) is in the part of it not checked yet? "
-        "Score them independently. JSON only.")
+        "\n\nFor each of the 1 nodes above: how likely is it that the target (bed) is in the part of that room not "
+        "seen yet? Score all 1, independently. JSON only.")
 
 
 # -- the room line ---------------------------------------------------------------------------------------------------
 def test_the_prompt_lists_every_node_in_the_format_the_legend_explains():
+    """A room line holds four things (2026-11-17): its type, the floor mapped out of its floor, the frontiers left
+    and the effort spent inside. An unclassified room -- and no other -- lists the objects seen in it."""
     text = format_prompt("bed", NODES, SearchContext(HOUSE))
     assert "TARGET: bed" in text and "NODES (5)" in text and "HOUSE: " + HOUSE in text
-    assert format_node(KITCHEN) == ("id=0  ROOM  type=kitchen  size=12m2  frontier=0  exits=0  "
-                                    "status=scanned(full rotation, 2min ago)  searched=40s  seen: sink x2, fridge")
-    assert format_node(LIVING).endswith("status=entered  searched=20s  seen: sofa, television")
-    assert format_node(UNKNOWN) == ("id=2  ROOM  type=unknown  size=18m2  frontier=3  exits=0  status=never_entered  "
-                                    "searched=0s  seen: nothing yet")
+    assert format_node(KITCHEN) == "id=0  ROOM  type=kitchen  mapped=unknown of 12 m2  frontier=0  searched=40s"
+    assert format_node(LIVING) == "id=1  ROOM  type=living_room  mapped=unknown of 25 m2  frontier=1  searched=20s"
+    assert format_node(UNKNOWN) == ("id=2  ROOM  type=unknown (seen: nothing yet)  mapped=unknown of 18 m2  frontier=3  "
+                                    "searched=never")
     assert all(line.startswith("id=") for line in text.split("NODES (5):\n")[1].split("\n\n")[0].splitlines())
     weak = SearchNode(4, ROOM, "bedroom", tentative=True, area_m2=14.0)
-    assert "type=bedroom?" in format_node(weak) and "type=unknown  " in format_node(replace_label(weak, "unknown"))
+    assert "type=bedroom?  " in format_node(weak) and "type=unknown (seen: nothing yet)  " in format_node(replace_label(weak, "unknown"))
+    # Everything else the scene graph stores about the room is on the node for the record and not on its line.
+    full = SearchNode(3, ROOM, "bedroom", area_m2=12.4, observed_m2=6.1, frontier_clusters=1, searched_s=43.0,
+                      last_inside_ago_s=5.0, objects=("bed", "wardrobe"), connected=("hallway",), exits=2, doorways=1,
+                      unseen_m2=30.0, glimpsed=("sink",), scanned="full rotation", scanned_ago_s=60.0, footprint_m2=14.0,
+                      length_m=4.0, width_m=3.5, walls_seen=4, bounded=True, covered_fraction=0.8, covered_m2=11.2,
+                      left_m2=2.8, target_seen=True, here=True)
+    assert format_node(full, 1.0) == "id=3  ROOM  type=bedroom  mapped=6 of 12 m2 (50%)  frontier=1  searched=40 actions"
+    for gone in ("size=", "covered=", "exits=", "status=", "connected to", "seen:", "glimpsed", "target:", "here"):
+        assert gone not in format_node(full, 1.0), gone
 
 
 def replace_label(node, label):
@@ -138,12 +151,14 @@ def replace_label(node, label):
 
 
 def test_effort_is_written_in_actions_when_the_context_gives_the_action_time():
-    """One unit on the whole prompt: the HOUSE line's budget is in actions, so the time spent in a room and the age
-    of its scan are too -- the model can set one beside the other. A rig that does not count actions keeps time."""
-    assert format_node(KITCHEN, 1.0) == ("id=0  ROOM  type=kitchen  size=12m2  frontier=0  exits=0  "
-                                         "status=scanned(full rotation, 120 actions ago)  searched=40 actions  "
-                                         "seen: sink x2, fridge")
+    """One unit on the whole prompt: the HOUSE line's budget is in actions, so the time spent in a room is too --
+    the model can set one beside the other. A rig that does not count actions keeps time. A room the robot has
+    never been inside reads ``never`` in either unit: that it was not entered is what its line says of the search."""
+    assert format_node(KITCHEN, 1.0) == "id=0  ROOM  type=kitchen  mapped=unknown of 12 m2  frontier=0  searched=40 actions"
     assert "searched=10 actions" in format_node(LIVING, 2.0), "20 s at 2 s an action"
+    assert format_node(UNKNOWN).endswith("searched=never") and format_node(UNKNOWN, 1.0).endswith("searched=never")
+    stepped_in = SearchNode(5, ROOM, "hallway", area_m2=6.0, searched_s=3.0, last_inside_ago_s=40.0)
+    assert format_node(stepped_in, 1.0).endswith("searched=0 actions"), "entered and crossed in three actions: not never"
     assert coarse_duration(43.0, 1.0) == "40 actions" and coarse_duration(46.0, 1.0) == "50 actions"
     assert coarse_duration(4.0, 1.0) == "0 actions" and coarse_duration(250.0, 0.5) == "480 actions", "4 min at 2 an s"
     assert coarse_duration(43.0) == "40s" and coarse_duration(150.0, None) == "2min" and coarse_duration(None, 1.0) == "never"
@@ -154,7 +169,7 @@ def test_effort_is_written_in_actions_when_the_context_gives_the_action_time():
         expected = int(text[:-1]) if text.endswith("s") else 60 * int(text[:-3])
         assert coarse_duration(seconds, 1.0) == "%d actions" % expected, seconds
     text = format_prompt("bed", [KITCHEN], SearchContext(HOUSE, action_time_s=1.0))
-    assert "searched=40 actions" in text and "120 actions ago" in text and "2min" not in text
+    assert "searched=40 actions" in text and "40s" not in text
     assert "searched=40s" in format_prompt("bed", [KITCHEN], SearchContext(HOUSE))
     assert SearchNode(5, ROOM, "bedroom", scanned="fragment").status_words(1.0) == "scanned(fragment)", "no step known: no ago"
     for bad in (0.0, -1.0, float("nan"), float("inf")):
@@ -162,75 +177,95 @@ def test_effort_is_written_in_actions_when_the_context_gives_the_action_time():
             SearchContext(HOUSE, action_time_s=bad)
 
 
-def test_the_objects_of_a_room_are_shown_with_their_counts_the_most_numerous_first():
-    """The graph stores one entry per confirmed object; four chairs and a table say more than "chair, table"."""
+def test_the_objects_of_an_unclassified_room_are_shown_with_their_counts_the_most_numerous_first():
+    """The graph stores one entry per confirmed object; four chairs and a table say more than "chair, table". They
+    are on the line of a room that has no classification yet, and then only (2026-11-17): a classified room's
+    type stands for them."""
     assert counted(("chair", "table", "Chair", " chair ", "chair")) == "chair x4, table"
     assert counted(("sofa", "bed")) == "bed, sofa" and counted(()) == "" and counted(("", "  ")) == ""
     assert counted(("b", "a", "a", "c", "c"), limit=2) == "a x2, c x2, +1 more", "the rarest kind is the one cut, and the cut shows"
     assert counted(("b", "a"), limit=2) == "a, b" and counted(("a",), limit=0) == "+1 more"
-    dining = SearchNode(6, ROOM, "dining_room", area_m2=14.0, objects=("chair",) * 6 + ("table", "plant"))
-    assert format_node(dining).endswith("seen: chair x6, plant, table")
+    objects = ("chair",) * 6 + ("table", "plant")
+    unnamed = SearchNode(6, ROOM, "unknown", area_m2=14.0, objects=objects)
+    assert format_node(unnamed) == ("id=6  ROOM  type=unknown (seen: chair x6, plant, table)  mapped=unknown of 14 m2  "
+                                    "frontier=0  searched=never")
+    dining = SearchNode(6, ROOM, "dining_room", area_m2=14.0, objects=objects)
+    assert format_node(dining) == "id=6  ROOM  type=dining_room  mapped=unknown of 14 m2  frontier=0  searched=never"
+    assert "seen" not in format_node(SearchNode(6, ROOM, "dining_room", tentative=True, objects=objects)), "nor a tentative type's"
     crowded = SearchNode(7, ROOM, "unknown", objects=tuple("k%02d" % i for i in range(12)) + ("k11",))
-    assert format_node(crowded).endswith("seen: k11 x2, k00, k01, k02, k03, k04, k05, k06, +4 more"), (
+    assert "type=unknown (seen: k11 x2, k00, k01, k02, k03, k04, k05, k06, +4 more)  " in format_node(crowded), (
         "eight kinds at most, and the model is told the list was cut: it reads the absence of an object from it")
-    # What was glimpsed through an exit is a kind, not a census: one name however many exits showed it.
+    assert format_prompt("bed", [unnamed]) != format_prompt("bed", [SearchNode(6, ROOM, "unknown", area_m2=14.0)])
+    assert format_prompt("bed", [dining]) == format_prompt("bed", [SearchNode(6, ROOM, "dining_room", area_m2=14.0)])
+    # What was glimpsed through an exit is a kind, not a census (an opening node's line, the deprecated mode).
     assert kinds(("Sink ", "sink", "bed", "", " ")) == ("bed", "sink")
-    seen_through = SearchNode(8, ROOM, "hallway", exits=2, glimpsed=("sink", "Sink", "toilet"))
-    assert format_node(seen_through).endswith("glimpsed through its exits: sink, toilet")
 
 
-def test_a_room_in_which_the_target_was_detected_and_not_reached_says_so_and_no_other_line_does():
-    """The prompt says the detector has looked at the covered floor WITHOUT finding the target. That is true of a
-    room unless one of the target's own kind is among its confirmed objects (the closing let it go: no route, a
-    failed inspection) -- and then the line says so, in words that need no legend. The 3B's version deliberately
-    has none: explaining the note made that model read its absence from a line as "the target is not there" and
-    put every node of a query at 0 (probed on 2026-11-16; ``core/mapping/topology/README.md``)."""
-    found = SearchNode(3, ROOM, "bathroom", area_m2=5.0, objects=("sink", "toilet"), last_inside_ago_s=9.0, target_seen=True)
-    assert format_node(found).endswith("seen: sink, toilet  target: detected here, not reached")
-    for unsaid in (None, False):
-        line = format_node(SearchNode(3, ROOM, "bathroom", area_m2=5.0, objects=("sink", "toilet"), target_seen=unsaid))
-        assert "target:" not in line and line.endswith("seen: sink, toilet")
-    assert "target:" not in format_node(SearchNode(200001, OPENING, "doorway", target_seen=True)), "a room's fact"
-    assert "detected here" not in SYSTEM_PROMPT and "not reached" not in SYSTEM_PROMPT
-    assert format_prompt("toilet", [found]) != format_prompt("toilet", [SearchNode(
-        3, ROOM, "bathroom", area_m2=5.0, objects=("sink", "toilet"), last_inside_ago_s=9.0)])
-
-
-def test_the_rooms_a_door_joins_it_to_are_on_its_line():
-    """The scene graph's edges: a room's line names the types of the rooms a door or a doorway joins it to."""
-    hall = SearchNode(7, ROOM, "hallway", area_m2=6.0, connected=("bedroom", "kitchen", "bedroom", "unknown"))
-    assert format_node(hall) == ("id=7  ROOM  type=hallway  size=6m2  frontier=0  exits=0  status=never_entered  "
-                                 "searched=0s  connected to: bedroom x2, kitchen, unknown  seen: nothing yet")
-    assert "connected to" not in format_node(UNKNOWN), "no edge: unsaid"
-    assert format_prompt("bed", [hall]) != format_prompt("bed", [SearchNode(7, ROOM, "hallway", area_m2=6.0)])
-
-
-def test_a_rooms_exits_are_attributes_on_its_line():
-    """Room-level GAPs (2026-10-21): a doorway or gap to unseen space is the room's attribute, never a node with a
-    number of its own. What an exit promises is the model's to judge: the prompt says what the field is, no more."""
-    hallway = SearchNode(7, ROOM, "hallway", area_m2=6.0, frontier_clusters=1, last_inside_ago_s=4.0,
-                         exits=2, doorways=1, glimpsed=("toilet", "Toilet", "sink"))
-    assert format_node(hallway) == ("id=7  ROOM  type=hallway  size=6m2  frontier=1  exits=2 (1 doorway)  status=entered  "
-                                    "searched=0s  seen: nothing yet  glimpsed through its exits: sink, toilet")
+def test_what_the_planner_and_the_record_keep_is_not_on_the_line():
+    """Removed from the line on 2026-11-17, and still on the node for the recording: the rooms a door joins it to
+    (connections are the planner's, with the distances), its exits and what was glimpsed through them, its status
+    word, the size of its footprint, and the note that the target's kind was detected in it and not reached (a
+    confirmed target is a landmark node of the loop's own, at a fixed probability, without the model)."""
+    plain = SearchNode(7, ROOM, "hallway", area_m2=6.0, observed_m2=3.0, frontier_clusters=1, last_inside_ago_s=4.0)
+    line = format_node(plain)
+    assert line == "id=7  ROOM  type=hallway  mapped=3.0 of 6.0 m2 (50%)  frontier=1  searched=0s"
+    for extra in (dict(connected=("bedroom", "kitchen", "bedroom", "unknown")), dict(exits=2, doorways=1, unseen_m2=30.0),
+                  dict(glimpsed=("toilet", "sink")), dict(scanned="full rotation", scanned_ago_s=40.0),
+                  dict(target_seen=True), dict(objects=("sink", "toilet")), dict(here=True),
+                  dict(footprint_m2=9.0, length_m=4.0, width_m=1.5, walls_seen=3, bounded=False, open_perimeter_m=2.0),
+                  dict(covered_fraction=0.9, covered_m2=8.0, left_m2=1.0)):
+        fuller = SearchNode(7, ROOM, "hallway", area_m2=6.0, observed_m2=3.0, frontier_clusters=1, last_inside_ago_s=4.0, **extra)
+        assert format_node(fuller) == line, "%s is for the record, not for the model" % sorted(extra)
+        assert format_prompt("toilet", [fuller]) == format_prompt("toilet", [plain]), "so it buys no call either"
+    for word in ("detected here", "not reached", "connected to", "exits=", "status=", "glimpsed through its exits"):
+        assert word not in SYSTEM_PROMPT, word
+    # The helpers that wrote those fields are kept (the exits of a room are still counted and recorded).
     assert format_exits(0) == "0" and format_exits(3) == "3" and format_exits(3, 2) == "3 (2 doorways)"
     assert format_exits(1, 5) == "1 (1 doorway)", "no more doorways than exits"
-    # Since 2026-10-22 the unseen floor behind the exits rides in the brackets: where the unexplored space is.
     assert format_exits(2, 1, 30.4) == "2 (1 doorway, ~30m2 unseen behind them)"
     assert format_exits(2, 0, 7.6) == "2 (~8m2 unseen behind them)" and format_exits(0, 0, 12.0) == "0"
     assert format_exits(2, 0, 0.2) == "2", "under half a square metre is nothing to say"
-    wing = SearchNode(8, ROOM, "hallway", exits=2, unseen_m2=30.0)
-    assert "exits=2 (~30m2 unseen behind them)" in format_node(wing)
-    assert "glimpsed through its exits" not in format_node(SearchNode(7, ROOM, "hallway", exits=1)), "nothing glimpsed: unsaid"
-    flat = " ".join(SYSTEM_PROMPT.split())
-    assert ("exits= doorways and gaps on the room's edge that lead to space not seen yet; in brackets, how many are at a "
-            "door frame and how much unseen floor lies behind them.") in flat
     assert "RAISE" not in SYSTEM_PROMPT and "fits the target" not in SYSTEM_PROMPT, "no rule on what an exit is worth"
     assert "  OPENING  " not in SYSTEM_PROMPT, "no opening node line in the room-level prompt"
-    assert system_prompt([hallway, KITCHEN], SearchContext(HOUSE)) == SYSTEM_PROMPT, "no exit node offered: no supplement"
-    # The attributes change the prompt the way any fact does, and an unchanged map keeps it byte-identical.
-    assert format_prompt("toilet", [hallway]) != format_prompt("toilet", [SearchNode(7, ROOM, "hallway", frontier_clusters=1,
-                                                                                      last_inside_ago_s=4.0)])
-    assert format_prompt("toilet", [hallway]) == format_prompt("toilet", [hallway])
+    assert system_prompt([plain, KITCHEN], SearchContext(HOUSE)) == SYSTEM_PROMPT, "no exit node offered: no supplement"
+
+
+def test_the_mapped_floor_is_given_as_areas_and_as_a_share_the_model_reads_and_does_not_compute():
+    """``mapped=6 of 12 m2 (50%)``: the floor the camera has seen from detection range out of the room's floor,
+    and their share -- a room of 4 m2 and one of 40 m2 can both stand at 50 %, so the areas are said too. The
+    floor is the free cells alone (floor the robot can stand on): no furniture island, no settled pocket."""
+    def mapped(area, seen, **fields):
+        return format_mapped(SearchNode(0, ROOM, "unknown", area_m2=area, observed_m2=seen, **fields))
+    assert mapped(12.4, 6.1) == "6 of 12 m2 (50%)" and mapped(40.0, 20.0) == "20 of 40 m2 (50%)"
+    assert mapped(4.0, 2.0) == "2.0 of 4.0 m2 (50%)", "the same share of a tenth of the floor"
+    assert mapped(12.0, 0.0) == "0 of 12 m2 (0%)" and mapped(12.0, 12.0) == "12 of 12 m2 (100%)"
+    # A hundred is kept for a room seen whole, and under it the mapped part never reads as the whole floor.
+    assert mapped(12.0, 11.8) == "11 of 12 m2 (90%)" and mapped(6.2, 5.6) == "5.6 of 6.2 m2 (90%)"
+    assert mapped(19.96, 9.98) == "10 of 20 m2 (50%)" and mapped(6.2, 6.16) == "6.1 of 6.2 m2 (90%)"
+    assert mapped(12.0, 11.95) == "12 of 12 m2 (100%)" and mapped(12.0, 13.5) == "12 of 12 m2 (100%)", "never more than the room"
+    assert mapped(12.0, -1.0) == "0 of 12 m2 (0%)"
+    # The footprint (furniture and pockets included) is NOT the room's floor here: only where the robot can stand.
+    assert mapped(8.0, 4.0, footprint_m2=11.0, covered_m2=7.0, covered_fraction=0.64, left_m2=4.0) == "4.0 of 8.0 m2 (50%)"
+    # Under ten square metres a whole number says too little: one decimal, and never a room of nothing.
+    assert mapped(1.2, 0.96) == "1.0 of 1.2 m2 (80%)" and mapped(0.4, 0.1) == "0.1 of 0.4 m2 (30%)"
+    assert mapped(9.94, 5.0) == "5.0 of 9.9 m2 (50%)" and mapped(9.96, 5.0) == "5 of 10 m2 (50%)"
+    assert mapped(0.03, 0.03) == "0.1 of 0.1 m2 (100%)" and mapped(0.03, 0.0) == "0.0 of 0.1 m2 (0%)"
+    # Without the observation record (no sight ledger) the room's floor is said and the mapped part is not.
+    assert mapped(12.0, None) == "unknown of 12 m2" and mapped(0.4, None) == "unknown of 0.4 m2"
+    assert mapped(0.0, None) == "unknown" and mapped(0.0, 0.0) == "unknown", "a room of no known size"
+    # The share is shown in tens, so a frame that saw three more cells does not change the prompt.
+    a = format_prompt("toilet", [SearchNode(3, ROOM, "bedroom", area_m2=12.0, observed_m2=9.7)])
+    b = format_prompt("toilet", [SearchNode(3, ROOM, "bedroom", area_m2=12.0, observed_m2=10.1)])
+    assert a == b and a != format_prompt("toilet", [SearchNode(3, ROOM, "bedroom", area_m2=12.0, observed_m2=10.9)])
+    flat = " ".join(SYSTEM_PROMPT.split())
+    assert ("mapped= the floor of the room the robot has already seen, out of all its floor, in square metres and as a "
+            "percentage. Only floor the robot can reach counts.") in flat
+    assert ("frontier= how many places are left in the room where the mapped floor borders space not seen yet.") in flat
+    assert ('searched= how many actions the robot has already spent searching inside the room. "never": it has not '
+            "entered the room.") in flat
+
+
+
 
 
 def _covered(covered_m2, fraction, left_m2, bounded):
@@ -243,18 +278,19 @@ def test_a_rooms_size_says_what_the_map_knows_and_does_not_call_it_final():
     """Room extents: the size reads ``all sides mapped`` when every side is located -- no part of the room lies
     outside the map -- and ``at least`` otherwise. Not "final": of 252 rooms the first wording declared final in 40
     HM3D recordings, 73 were over a quarter bigger by the end of the episode, 229 of the 233 growths being the
-    partition joining or re-cutting rooms whose floor was mapped all along. The words claim what the reading knows."""
+    partition joining or re-cutting rooms whose floor was mapped all along. The words claim what the reading knows.
+    Since 2026-11-17 these words are no longer on a room's line (``mapped=`` is); the helpers are kept."""
     bounded = SearchNode(3, ROOM, "bedroom", area_m2=11.2, footprint_m2=12.6, length_m=4.1, width_m=3.05,
                          walls_seen=4, bounded=True, covered_fraction=0.87, covered_m2=10.9, left_m2=1.7, last_inside_ago_s=5.0)
-    assert format_node(bounded) == ("id=3  ROOM  type=bedroom  size=13m2 (4x3m, all sides mapped)  covered=11m2 (80% of the "
-                                    "room, 2m2 left)  frontier=0  exits=0  status=entered  searched=0s  seen: nothing yet")
+    assert format_size(bounded) == "13m2 (4x3m, all sides mapped)"
+    assert format_coverage(bounded) == "11m2 (80% of the room, 2m2 left)"
     partial = SearchNode(4, ROOM, "unknown", area_m2=6.0, footprint_m2=6.0, length_m=4.9, width_m=2.4,
                          length_final=False, width_final=True, walls_seen=3, bounded=False,
                          covered_fraction=0.43, covered_m2=2.6, left_m2=3.4, frontier_clusters=1)
     assert format_size(partial) == "at least 6m2 (5+ x 2.5m, 1 of 4 sides not mapped yet)"
     assert format_coverage(partial) == "3m2 (at most 50% of the room, at least 3m2 left)", "a bound rounds UP, a share DOWN"
-    assert ("  size=at least 6m2 (5+ x 2.5m, 1 of 4 sides not mapped yet)  covered=3m2 (at most 50% of the room, at least "
-            "3m2 left)  frontier=1  ") in format_node(partial)
+    for line in (format_node(bounded), format_node(partial)):
+        assert "size=" not in line and "covered=" not in line and "sides" not in line, line
     done = SearchNode(5, ROOM, "kitchen", footprint_m2=12.0, bounded=True, covered_fraction=0.996, covered_m2=11.95, left_m2=0.05)
     assert format_coverage(done) == "12m2 (all of it)"
     sliver = SearchNode(6, ROOM, "unknown", area_m2=0.3, footprint_m2=0.3, length_m=0.9, width_m=0.3,
@@ -285,22 +321,12 @@ def test_a_rooms_size_says_what_the_map_knows_and_does_not_call_it_final():
     assert area_words(0.02) == "0m2" and area_words(0.6) == "under 1m2" and area_words(11.5) == "12m2"
     # Without the extents (an older rig, a storey before its first frame) the line carries the area alone.
     assert format_size(UNKNOWN) == "18m2" and format_coverage(UNKNOWN) is None
-    assert "covered=" not in format_node(UNKNOWN)
     assert format_size(SearchNode(6, ROOM, "unknown", area_m2=0.4)) == "under 1m2"
     assert format_size(SearchNode(7, ROOM, "unknown")) == "unknown size"
     # With the extents but no observation record (no sight ledger) the size is said and the coverage is not.
     unobserved = SearchNode(8, ROOM, "unknown", footprint_m2=12.0, length_m=4.0, width_m=3.0, walls_seen=4, bounded=True)
-    assert "size=12m2 (4x3m, all sides mapped)  frontier=0" in format_node(unobserved)
-    # Coverage is shown in tens, so a frame that saw three more cells does not change the prompt.
-    a = format_prompt("toilet", [SearchNode(3, ROOM, "bedroom", bounded=True, covered_fraction=0.81, covered_m2=9.7, left_m2=2.3)])
-    b = format_prompt("toilet", [SearchNode(3, ROOM, "bedroom", bounded=True, covered_fraction=0.89, covered_m2=9.7, left_m2=2.3)])
-    assert a == b
-    assert a != format_prompt("toilet", [SearchNode(3, ROOM, "bedroom", bounded=True, covered_fraction=0.90, covered_m2=9.7, left_m2=2.3)])
-    # What the prompt says of it: no promise the reading cannot keep.
-    flat = " ".join(SYSTEM_PROMPT.split())
-    assert ('"all sides mapped": no part of the room lies outside the map, though the map\'s division into rooms may '
-            "still be revised.") in flat
-    assert '"at least": a side is not mapped yet and the room continues beyond it' in flat
+    assert format_size(unobserved) == "12m2 (4x3m, all sides mapped)" and format_coverage(unobserved) is None
+    # No promise the reading cannot keep, on the line or in the prompt.
     for promise in ("FINAL", "final", "no bigger", "all walls seen", "walls not seen"):
         assert promise not in SYSTEM_PROMPT and promise not in format_node(bounded) and promise not in format_node(partial), promise
 
@@ -318,11 +344,7 @@ def test_the_coverage_words_hand_the_model_results_it_reads_and_does_not_compute
     assert _covered(0.0, 0.0, 7.0, bounded=False) == "0m2 (at most 0% of the room, at least 7m2 left)"
     assert _covered(3.0, 1.7, 0.0, bounded=True) == "3m2 (all of it)" and _covered(3.0, -0.2, 9.0, bounded=True) == (
         "3m2 (0% of the room, 9m2 left)"), "a share outside 0-1 is clamped, never printed"
-    flat = " ".join(SYSTEM_PROMPT.split())
-    assert ('covered= floor of the room the detector has already checked: its area and its share of the room. "left": '
-            "floor it has not checked yet.") in flat
-    assert "searched= how long the robot has spent inside the room so far." in flat
-    assert "coverage overrides" not in flat and "observed=" not in SYSTEM_PROMPT, "what the two facts are worth is the model's"
+    assert "coverage overrides" not in SYSTEM_PROMPT and "observed=" not in SYSTEM_PROMPT and "covered=" not in SYSTEM_PROMPT
 
 
 def test_an_opening_node_is_the_deprecated_mode_and_brings_its_own_supplement():
@@ -335,9 +357,10 @@ def test_an_opening_node_is_the_deprecated_mode_and_brings_its_own_supplement():
     text = format_prompt("couch", NODES, SearchContext(HOUSE))
     assert "NODES (5)" in text and "id=200001  OPENING" in text
     for part in ("An OPENING line is a doorway or gap at the edge of the mapped floor", "offered as a node of its own",
-                 "not counted in its room's exits=", "estimate the probability that the target is in the space behind it",
+                 "estimate the probability that the target is in the space behind it",
                  '"glimpsed through it:" objects seen beyond it'):
         assert part in " ".join(OPENINGS_SUPPLEMENT.split()) and part not in SYSTEM_PROMPT, part
+    assert "exits=" not in OPENINGS_SUPPLEMENT, "a room line carries no exits= since 2026-11-17"
     assert len(OPENINGS_SUPPLEMENT) < 400
     assert system_prompt([KITCHEN, GAP], SearchContext(HOUSE)) == SYSTEM_PROMPT + OPENINGS_SUPPLEMENT
     assert system_prompt([KITCHEN, LIVING], SearchContext(HOUSE)) == SYSTEM_PROMPT
@@ -373,8 +396,9 @@ def test_the_room_status_words():
     assert SearchNode(5, ROOM, "bedroom", scanned="fragment").status == "scanned(fragment)", "no step known: no ago"
     scanned = SearchNode(5, ROOM, "unknown", scanned="seen from another room's scan", scanned_ago_s=10.0)
     assert not scanned.unexplored, "a scanned room is not an unknown place, whatever its type"
-    assert "status=scanned(seen from another room's scan, 10s ago)" in format_node(scanned)
-    assert "status=scanned(seen from another room's scan, 10 actions ago)" in format_node(scanned, 1.0)
+    assert scanned.status == "scanned(seen from another room's scan, 10s ago)"
+    assert scanned.status_words(1.0) == "scanned(seen from another room's scan, 10 actions ago)"
+    assert "status=" not in format_node(scanned) and "scanned" not in format_node(scanned, 1.0), "for the record since 2026-11-17"
 
 
 def test_coarse_seconds_and_the_budget_line_keep_an_unchanged_map_an_unchanged_prompt():
@@ -437,6 +461,31 @@ def test_field_names_a_model_drifts_to_are_read():
     scores, _, _, _ = parse_reply({"nodes": [{"id": 0, "probability": 0.25}, {"id": 1, "percent": 30},
                                              {"id": 2, "score": 45}, {"id": 200001, "p": "10"}]}, NODES)
     assert scores[0] == 25.0 and scores[1] == 30.0 and scores[2] == 45.0 and scores[200001] == 10.0
+
+
+def test_the_models_numbers_are_read_as_percentages_whatever_it_wrote_them_as():
+    """The model need not write exactly what RPT* takes (2026-11-17): a number as text, a percent sign, an id as
+    text, a whole reply in fractions of one. None of it is knowledge of a room or an object."""
+    scores, _, _, omitted = parse_reply({"nodes": [{"id": "0", "p": "40%"}, {"id": 1, "p": " 35 % "}, {"id": 2, "p": "12.5"},
+                                                   {"id": 200001, "p": 7}, {"id": 200002, "p": "a lot"}]}, NODES)
+    assert scores[0] == 40.0 and scores[1] == 35.0 and scores[2] == 12.5 and scores[200001] == 7.0
+    assert omitted == (200002,) and scores[200002] == OMITTED_PERCENT, "words are no number: forgotten, not ruled out"
+    # Fractions of one, read off the reply as a whole: none above 1 and one strictly between 0 and 1.
+    assert written_as_fractions([{"id": 0, "p": 0.4}, {"id": 1, "p": 0}, {"id": 2, "p": 1}])
+    assert not written_as_fractions([{"id": 0, "p": 0.4}, {"id": 1, "p": 30}]), "one number above 1: percentages"
+    assert not written_as_fractions([{"id": 0, "p": 1}, {"id": 1, "p": 0}]), "0 and 1 alone are the percentages asked for"
+    assert not written_as_fractions([]) and not written_as_fractions([{"id": 0}, "prose"])
+    scores, _, _, _ = parse_reply({"nodes": [{"id": 0, "p": 0.4}, {"id": 1, "p": 0}, {"id": 2, "p": "0.85"}]}, NODES[:3])
+    assert scores == {0: 40.0, 1: 0.0, 2: 85.0}
+    scores, _, _, _ = parse_reply({"nodes": [{"id": 0, "p": 1}, {"id": 1, "p": 0}, {"id": 2, "p": 1}]}, NODES[:3])
+    assert scores == {0: 1.0, 1: 0.0, 2: 1.0}, "a model that means one percent is not read as certain"
+    # A fraction is scaled once, whichever way it was recognised; an invented id does not vote on the scale.
+    scores, _, _, _ = parse_reply({"nodes": [{"id": 0, "probability": 0.005}, {"id": 1, "probability": 0.5}]}, NODES[:2])
+    assert scores == {0: 0.5, 1: 50.0}
+    scores, _, _, _ = parse_reply({"nodes": [{"id": 0, "p": 30}, {"id": 1, "p": 60}, {"id": 99, "p": 0.5}]}, NODES[:2])
+    assert scores == {0: 30.0, 1: 60.0}
+    scores, _, _, _ = parse_reply({"nodes": [{"id": 0, "p": 0.4}, {"id": 1, "p": "90%"}, {"id": 2, "p": 0.1}]}, NODES[:3])
+    assert scores == {0: 0.4, 1: 90.0, 2: 0.1}, "a number above 1 settles the scale: these are percentages"
 
 
 @pytest.mark.parametrize("reply", [None, "prose", {}, {"nodes": "x"}, {"nodes": []},
@@ -539,10 +588,43 @@ def test_the_pass_verdict_is_read_from_the_words_a_model_drifts_to():
             '"first".') in " ".join(SYSTEM_PROMPT.split()), "the word is defined, not prescribed"
 
 
-# -- the optional floor: off by default, the 3B era's arithmetic on request ------------------------------------------------
+# -- a room never entered is never zero (2026-11-17) ----------------------------------------------------------------------
 DOORWAY_WITH_TOILET = SearchNode(200003, OPENING, "doorway", objects=("toilet",), via="room 2 (type=unknown)")
 UNKNOWN_ENTERED = SearchNode(3, ROOM, "unknown", area_m2=9.0, frontier_clusters=2, searched_s=12.0, last_inside_ago_s=20.0)
 WEAK_BEDROOM_UNENTERED = SearchNode(4, ROOM, "bedroom", tentative=True, area_m2=14.0, frontier_clusters=1)
+
+
+def test_a_room_never_entered_is_never_handed_on_at_zero_and_an_entered_rooms_zero_stands():
+    """A zero says "certain the target is not there". Of a room the robot has been inside that is the model's
+    verdict, and the room is then no node for the planner; of a room seen from outside only it is more than anybody
+    knows, so the number is read as not given -- small, not nothing -- and the loop's floor for a room never
+    entered then holds for it. The rule reads whether the robot was ever inside, and nothing else."""
+    nodes = [KITCHEN, UNKNOWN, WEAK_BEDROOM_UNENTERED, UNKNOWN_ENTERED, GAP]
+    reply = {"nodes": [{"id": 0, "why": "searched, none found", "p": 0}, {"id": 2, "why": "nothing seen there", "p": 0},
+                       {"id": 4, "why": "not where it is kept", "p": 0}, {"id": 3, "why": "searched", "p": 0},
+                       {"id": 200002, "why": "nothing glimpsed", "p": 0}]}
+    scores, raised = keep_unentered(parse_reply(reply, nodes)[0], nodes)
+    assert raised == (2, 4), "the two rooms never entered, whatever their type; no other node"
+    assert scores[2] == scores[4] == OMITTED_PERCENT and scores[0] == scores[3] == scores[200002] == 0.0
+    result = SearchNodeOracle.score(reply, nodes)
+    assert result.probs == pytest.approx({0: 0.0, 2: 0.01, 4: 0.01, 3: 0.0, 200002: 0.0}) and result.floored == (2, 4)
+    assert result.reasons[4] == "not where it is kept", "the model's words are kept beside the raised number"
+    assert result.p_present > 0.0, "an all-zero reply no longer says that every listed search fails"
+    # A number the model did give stands, however small; an omitted room was never zero.
+    scored = {"nodes": [{"id": 2, "p": 1}, {"id": 4, "p": 3}]}
+    assert keep_unentered(parse_reply(scored, [UNKNOWN, WEAK_BEDROOM_UNENTERED])[0], [UNKNOWN, WEAK_BEDROOM_UNENTERED]) == (
+        {2: 1.0, 4: 3.0}, ())
+    assert SearchNodeOracle.score({"nodes": [{"id": 2, "p": 40}]}, [UNKNOWN, WEAK_BEDROOM_UNENTERED]).floored == ()
+    # A fraction of a percent on a room never entered is a zero in all but name.
+    assert SearchNodeOracle.score({"nodes": [{"id": 2, "p": 0.4}, {"id": 0, "p": 30}]}, [UNKNOWN, KITCHEN]).probs[2] == pytest.approx(0.01)
+    # It holds for a reply kept and re-read, and the flat ablation is untouched by it.
+    client = Scripted({"nodes": [{"id": 2, "p": 0}, {"id": 0, "p": 0}]})
+    oracle = SearchNodeOracle(client)
+    first, again = oracle.probabilities("toilet", [UNKNOWN, KITCHEN]), oracle.probabilities("toilet", [UNKNOWN, KITCHEN])
+    assert first.probs == again.probs == {2: pytest.approx(0.01), 0: 0.0} and again.reused and again.floored == (2,)
+
+
+# -- the optional floor: off by default, the 3B era's arithmetic on request ------------------------------------------------
 
 
 def test_which_nodes_are_unexplored():
@@ -596,7 +678,8 @@ def test_the_oracle_takes_no_hand_written_prior_about_where_the_target_lives():
         SearchNodeOracle(Scripted({}), home_floor=0.6)
     with pytest.raises(TypeError):
         SearchNode(1, ROOM, "bathroom", home=True)
-    bathroom = SearchNode(1, ROOM, "bathroom", area_m2=4.0, frontier_clusters=0, objects=("bathtub",))
+    bathroom = SearchNode(1, ROOM, "bathroom", area_m2=4.0, frontier_clusters=0, objects=("bathtub",),
+                          searched_s=20.0, last_inside_ago_s=60.0)
     nodes = [KITCHEN, bathroom, UNKNOWN]
     reply = {"nodes": [{"id": 0, "p": 0}, {"id": 1, "why": "bathroom, seen", "p": 0}, {"id": 2, "p": 30}]}
     result = SearchNodeOracle.score(reply, nodes, 0.25)

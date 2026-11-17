@@ -16,17 +16,18 @@ default version otherwise): **this is the tool a wording is tuned with** --
 copy a version, probe it on the model it is for, reword, probe again.
 
 **What it checks.** Since 2026-11-16 the prompt states the task, the meaning
-of the fields and the reply format, and no rule of judgement: where the
-target belongs and what the facts on a line are worth is the model's own to
-work out. So the probe does not check that rules were followed. Each
+of the fields and the reply format -- and, since 2026-11-17, what the search
+so far means for a room, in words -- and no knowledge of ours: where the
+target belongs is the model's own to work out. So the probe does not check
+that rules were followed. Each
 scenario states ONE coarse, ordinal claim that a reasoner who knows homes
 would not get wrong -- which of two nodes ranks above the other -- and the
 probe reports whether the model's numbers honour it. The claims are ours and
 are never shown to the model: they measure the model, they do not brief it.
 
 **Two sets** (``probe_node_oracle_scenarios.py``). ``P`` (twelve) is what a
-run sends by default: rooms only, size and coverage on every line, finished
-rooms not offered, exits as attributes. ``O`` (seven) is the first probe's
+run sends by default: rooms only, the mapped floor on every line, finished
+rooms not offered. ``O`` (seven) is the first probe's
 set, kept so results stay comparable: finished rooms offered, two openings as
 nodes of their own (the deprecated mode), and five scenarios on lines without
 size detail.

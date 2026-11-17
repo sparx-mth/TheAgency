@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -177,7 +178,7 @@ class PromptKeepingLLM:
         return self.inner.chat_json(system, user, **kwargs)
 
 
-def test_the_policy_reads_the_extents_every_action_and_the_oracle_is_shown_size_status_and_coverage():
+def test_the_policy_reads_the_extents_every_action_and_the_oracle_is_shown_the_floor_mapped():
     from sparx_agency.core.mapping.topology.room_extent import room_extents
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import method_snapshot
@@ -194,15 +195,18 @@ def test_the_policy_reads_the_extents_every_action_and_the_oracle_is_shown_size_
     nodes = policy.graph.nodes(policy.last_world, 3)
     assert nodes and nodes[0].bounded is False and nodes[0].covered_fraction is not None
     assert nodes[0].footprint_m2 == pytest.approx(extent.area_m2) and nodes[0].walls_seen == extent.walls_seen
+    # The line's ``mapped=`` (2026-11-17): the observed part of the room's FREE floor -- no furniture island,
+    # no settled pocket -- out of that floor.
+    assert nodes[0].area_m2 == pytest.approx(extent.free_m2) and nodes[0].observed_m2 == pytest.approx(extent.observed_m2)
+    assert 0.0 < nodes[0].observed_m2 <= nodes[0].area_m2
     assert llm.oracle_prompts, "the loop asked the oracle"
     system, user = llm.oracle_prompts[-1]
-    assert "covered=" in user and "observed=" not in user, user
-    assert "at most" in user or "all of the mapped part" in user, "a lower-bound size: the share is a bound, or all mapped"
-    assert "sides not mapped yet" in user and "open edge" in user, user
-    assert "searched=0 actions" in user and "here=" not in user, "the loop's context gives the action time; no whereabouts"
-    assert '"at least": a side is not mapped yet' in " ".join(system.split())
-    assert "covered= floor of the room the detector has already checked" in " ".join(system.split())
-    assert "COVERAGE FIRST" not in system and "TIME IS SECONDARY" not in system, "what the two facts are worth is the model's to judge"
+    assert re.search(r"  mapped=[0-9.]+ of [0-9.]+ m2 \(\d+%\)  frontier=\d+  searched=", user), user
+    for gone in ("size=", "covered=", "observed=", "exits=", "status=", "sides not mapped", "open edge", "seen:  "):
+        assert gone not in user, gone
+    assert "searched=never" in user and "here=" not in user, "asked before any action was credited to the room; no whereabouts"
+    assert "mapped= the floor of the room the robot has already seen, out of all its floor" in " ".join(system.split())
+    assert "COVERAGE FIRST" not in system and "TIME IS SECONDARY" not in system
     record = policy.episode_info()["last_reasoning"]
     assert record["extents"] and all("size_status" in item for item in record["extents"].values())
     assert any(node.get("bounded") is False for node in record["nodes"] if node.get("kind") == "room")
@@ -254,24 +258,23 @@ def test_the_scene_graph_turns_a_room_of_the_map_into_the_size_and_coverage_the_
     graph.update(world, [], None, reason=False)
     assert list(graph.extents) == list(graph.registry.rooms) == [0]
     assert format_node(graph.nodes(world, 0)[0]) == (
-        "id=0  ROOM  type=unknown  size=20m2 (5x4m, all sides mapped)  frontier=0  exits=0  status=never_entered  "
-        "searched=0s  seen: nothing yet"), "no sight record was given: the size, and no coverage"
+        "id=0  ROOM  type=unknown (seen: nothing yet)  mapped=unknown of 20 m2  frontier=0  searched=never"), (
+        "no sight record was given: the room's floor, and nothing of how much of it was seen")
     observed = np.zeros(world.grid.shape, dtype=bool)
     observed[20:60, 20:45] = True                                   # the half nearer the door was looked at
     graph.observed_provider = lambda world: observed
     graph.update(world, [], None, reason=False)
-    assert "  size=20m2 (5x4m, all sides mapped)  covered=10m2 (50% of the room, 10m2 left)  frontier=0  " in format_node(
-        graph.nodes(world, 0)[0])
-    # The far wall beyond the camera's reach: the same floor is a lower bound, and its covered share an upper one.
+    assert "  mapped=10 of 20 m2 (50%)  frontier=0  " in format_node(graph.nodes(world, 0)[0])
+    assert graph.extent_of(0).bounded and graph.nodes(world, 0)[0].bounded, "all four sides located: on the node, for the record"
+    # The far wall beyond the camera's reach: the same floor is mapped, and the line's frontier says the room goes on.
     open_world = _walled_room_world(far_wall=False)
     graph.update(open_world, [], None, reason=False)
-    assert ("  size=at least 20m2 (5+ x 4m, 1 of 4 sides not mapped yet, open edge 4m)  covered=10m2 (at most 50% of "
-            "the room, at least 10m2 left)  frontier=1  ") in format_node(graph.nodes(open_world, 0)[0])
+    assert "  mapped=10 of 20 m2 (50%)  frontier=1  " in format_node(graph.nodes(open_world, 0)[0])
     assert graph.extent_of(0).open_sides and graph.extent_records()["0"]["size_status"] == "lower_bound"
 
 
 def test_a_scene_graph_without_a_sight_record_says_the_size_and_nothing_of_the_coverage():
-    """No ledger, or a disabled one, is not "0% covered": the room line then carries the size alone."""
+    """No ledger, or a disabled one, is not "0% mapped": the room line then says the room's floor alone."""
     from sparx_agency.core.mapping.topology.search_node_oracle import format_node
     from sparx_agency.core.planning.object_search.world_model.sightlines import SightLedger, SightSettings
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
@@ -279,12 +282,12 @@ def test_a_scene_graph_without_a_sight_record_says_the_size_and_nothing_of_the_c
     for step in range(4):
         policy.plan(observation(episode, step, depth=3.0))
     world, graph = policy.last_world, policy.graph
-    assert "covered=" in format_node(graph.nodes(world, 3)[0])
+    assert re.search(r"  mapped=[0-9.]+ of [0-9.]+ m2 \(\d+%\)  ", format_node(graph.nodes(world, 3)[0]))
     assert SightLedger(policy, SightSettings(enabled=False)).observed_mask(world) is None, "a disabled ledger keeps no record"
     for provider in (None, lambda world: None):
         graph.observed_provider = provider
         graph.extents = graph._room_extents(world, graph.labels, graph.frontier_world(world), None)
         node = graph.nodes(world, 3)[0]
-        assert node.bounded is False and node.covered_fraction is None
+        assert node.bounded is False and node.covered_fraction is None and node.observed_m2 is None
         line = format_node(node)
-        assert "size=at least " in line and "covered=" not in line, line
+        assert "  mapped=unknown of " in line and "%" not in line, line

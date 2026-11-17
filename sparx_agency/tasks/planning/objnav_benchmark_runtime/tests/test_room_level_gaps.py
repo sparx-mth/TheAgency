@@ -78,14 +78,16 @@ def test_the_oracle_is_shown_rooms_only_each_with_its_exits_and_no_exit_gets_a_n
         "0": {"count": 1, "doorways": 0, "glimpsed": []}, "1": {"count": 2, "doorways": 0, "glimpsed": []}}
     assert policy.loop.estimate_events[0]["reopened"] == []
     assert "3 openings not yet looked into" in policy.reasoned_with[0]["context"].house, "the HOUSE line counts every exit"
-    # The real scene graph renders the attributes on the room's line, as the prompt describes them.
+    # The real scene graph keeps the attributes on the room's node -- for the record: since 2026-11-17 a room's
+    # prompt line holds its type, the floor mapped, the frontiers left and the actions spent, and no exits.
     nodes = {n.id: n for n in policy.graph.nodes(world, 0, exits=policy.reasoned_with[0]["exits"])}
     assert nodes[1].kind == ROOM and nodes[1].exits == 2 and nodes[1].doorways == 0 and nodes[1].glimpsed == ()
-    assert "  exits=2 (~1m2 unseen behind them)  " in format_node(nodes[1]) and "  exits=1 (~1m2" in format_node(nodes[0])
+    assert nodes[1].unseen_m2 > 0.0 and nodes[0].exits == 1
+    assert "exits=" not in format_node(nodes[1]) and "unseen" not in format_node(nodes[0])
     assert OPENING not in {n.kind for n in nodes.values()} and "OPENING" not in system_prompt(list(nodes.values()))
     # The frozen configuration says so.
     configuration = policy.configuration()
-    assert configuration["node_oracle"]["nodes"].endswith("each room's exits are attributes on its line, not nodes")
+    assert configuration["node_oracle"]["nodes"].endswith("each room's exits are the room's attributes, not nodes")
     assert configuration["openings"].startswith("every exit of the storey") and "landmark" in configuration["openings"]
     assert "room-level GAPs" in configuration["room_visit"]
     # The HUD shows every live exit, folded into its room, and renders.
@@ -104,8 +106,9 @@ def test_a_doorway_and_a_glimpse_through_it_are_the_rooms_attributes():
     summary = room_exits([option])
     assert summary == {0: RoomExits(count=1, doorways=1, glimpsed=("toilet",))}
     [node] = [n for n in policy.graph.nodes(world, 0, exits=summary) if n.id == 0]
+    assert (node.exits, node.doorways, node.glimpsed) == (1, 1, ("toilet",)), "on the node, for the record"
     line = format_node(node)
-    assert "exits=1 (1 doorway)" in line and line.endswith("glimpsed through its exits: toilet")
+    assert "exits=" not in line and "glimpsed" not in line and "toilet" not in line, "and not on its prompt line"
 
 
 # -- the local phase: the GAPs of the chosen room, to the end or the bound; then the global loop -------------

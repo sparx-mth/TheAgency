@@ -58,7 +58,7 @@ at a pitch that put the body of an object standing there in the frame
 (:func:`object_band`, :func:`cone_observed`). It is the record of where the
 detector has had its chance -- not where the agent walked -- and the room
 extents (``core/mapping/topology/room_extent.py``) read each room's share of
-it off the live partition: the ``covered=`` figure on the node line the
+it off the live partition: the ``mapped=`` figure on the node line the
 oracle values. Keyed by map cell, so a room the watershed renumbers keeps
 its coverage. Like everything else here it is cast over the agent's own map
 from the agent's own poses.

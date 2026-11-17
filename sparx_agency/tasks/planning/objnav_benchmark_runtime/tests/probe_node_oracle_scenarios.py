@@ -5,11 +5,19 @@ whether it holds)``. The claim is a coarse ranking that a reasoner who knows
 homes would not get wrong -- which of two nodes is worth more -- and is
 never shown to the model: it measures the model, it does not brief it.
 
-``P_SET`` (twelve) is what a run sends by default: rooms only, size and
-coverage on every line, finished rooms not offered, exits as attributes.
+``P_SET`` (twelve) is what a run sends by default: rooms only, the mapped
+floor on every line, finished rooms not offered.
 ``O_SET`` (seven) is the first probe's set, kept so that results stay
 comparable: finished rooms offered, two openings as nodes of their own (the
 deprecated mode), and five scenarios on lines without size detail.
+
+Since 2026-11-17 a room line holds its type, mapped floor, frontier count
+and effort alone. The builders still set everything else on the nodes, so
+one claim rests on what the model is no longer shown -- what was glimpsed
+through a room's exit (``P5``) -- and ``O4`` asks for a ranking among rooms
+searched whole, which the number (the target in the part of a room not seen
+yet) no longer expresses. Both are kept so the counts stay comparable; read
+them as such.
 
 Data and its builders only: the runner is ``probe_node_oracle.py``.
 """
@@ -32,7 +40,7 @@ def node(node_id, kind, label, **kwargs):
 
 def room(node_id, label, area, dims, covered, walls=4, open_m=0.0, tentative=False, frontier=0, exits=0, doorways=0,
          unseen=0.0, glimpsed=(), inside=None, searched=0, objects=(), connected=(), scanned=None, scanned_ago=None):
-    """A room as a run renders it: size and coverage on the line.
+    """A room as a run builds it; its line shows the type, the mapped floor, the frontiers and the effort.
 
     ``inside``: actions since the robot was last inside (0: it stands there; None: never entered). ``covered``:
     the share of the whole room, an upper bound when ``walls`` < 4 (a side is not mapped).
@@ -41,7 +49,8 @@ def room(node_id, label, area, dims, covered, walls=4, open_m=0.0, tentative=Fal
     return SearchNode(node_id, ROOM, label, tentative=tentative, area_m2=area, footprint_m2=area, length_m=dims[0],
                       width_m=dims[1], walls_seen=walls, bounded=bounded, length_final=bounded, width_final=True,
                       open_perimeter_m=open_m, covered_fraction=covered, covered_m2=area * covered,
-                      left_m2=area * (1.0 - covered), frontier_clusters=frontier, exits=exits, doorways=doorways,
+                      left_m2=area * (1.0 - covered), observed_m2=area * covered, frontier_clusters=frontier,
+                      exits=exits, doorways=doorways,
                       unseen_m2=unseen, glimpsed=tuple(glimpsed), last_inside_ago_s=inside, here=(inside == 0),
                       searched_s=searched, objects=tuple(objects), connected=tuple(connected), scanned=scanned,
                       scanned_ago_s=scanned_ago, target_seen=False)
@@ -53,7 +62,8 @@ def extent(area, length, width, walls=4, covered=None, open_m=0.0):
     fields = dict(footprint_m2=area, area_m2=area, length_m=length, width_m=width, walls_seen=walls, bounded=bounded,
                   length_final=bounded, width_final=True, open_perimeter_m=open_m)
     if covered is not None:
-        fields.update(covered_fraction=covered, covered_m2=area * covered, left_m2=area * (1.0 - covered))
+        fields.update(covered_fraction=covered, covered_m2=area * covered, left_m2=area * (1.0 - covered),
+                      observed_m2=area * covered)
     return fields
 
 

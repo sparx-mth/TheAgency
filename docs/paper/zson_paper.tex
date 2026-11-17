@@ -536,36 +536,40 @@ by walking to a point $1.5\m$ from it and looking at it.
 
 \subsection{Per-room success probabilities from a language model}\label{sec:oracle}
 \paragraph{Query.} At a loop point the model is shown the whole picture in one
-prompt (\cref{app:prompts-oracle}). A candidate is a room \emph{together with
-the unseen space that its exits open onto}, because a visit to a room looks
-through its exits (\cref{sec:visits}). The agent's detector has looked at the
-covered floor of every room in every frame without finding the target (a room
-in which a target was detected but not reached is marked as such). The model
-is therefore asked, for each candidate, for the probability \emph{that the
-target is in the part of it that has not been checked yet}: the floor of the
-room that is not covered, and the unseen space behind its exits. This is the
-probability that searching the candidate finds the target, and it is used as
-the $p(v)$ of \cref{eq:objective}. The prompt contains
+prompt (\cref{app:prompts-oracle}) and is asked, for every candidate room, for
+the probability \emph{that the target is in the part of that room the agent
+has not seen yet}. The prompt gives the reason for this wording: a detector
+examines every camera frame, so a target that has not been found lies in a
+place that has not been seen. The number is used as
+the $p(v)$ of \cref{eq:objective}, after the checks described below. The
+prompt contains
 (i) the name of the target category of the current episode, in every query;
 (ii) a one-line summary of the home so far: the room types found and whether
 each was entered or finished, how many rooms are unidentified, how many exits
 have not been looked into, whether unexplored frontier is still reachable, and
 how many of the $500$ actions are used; and
-(iii) one line per room with everything the scene graph stores about the room
-except where it is: its label (and whether the label is weak), its size and
-the floor area the camera has covered (both read from the agent's map, see
-below), the number of frontier clusters, its exits (count, how many at a
-detected doorway, unseen area behind them, objects glimpsed through them), its
-status (never entered / entered / finished and how), the number of actions
-spent inside, the labels of the rooms that a doorway joins it to, the
-objects confirmed in it with their counts (at most eight classes; the line
-says when the list was cut), and whether an object of the target category is
-among them.
+(iii) one line per room with four items and nothing else: its label (a weak
+label is marked; a room without a label is printed as \code{unknown} followed
+by the objects confirmed in it, with their counts, at most eight classes --- a
+labelled room does not list its objects); the floor already mapped out of the
+room's floor, in square metres and as a share (see below); the number of
+frontier clusters left in the room; and the number of actions already spent
+inside it, or \code{never} for a room that has not been entered.
+Earlier revisions printed everything the scene graph stores about a room
+except its position (its dimensions and which of its sides were located, its
+exits and the objects glimpsed through them, a status word, the labels of the
+adjacent rooms, the objects of every room, and a note when an object of the
+target category had been detected in it). These attributes are still kept
+with each candidate in the run record, but they are no longer shown to the
+model: which rooms a room is joined to, and how far anything is, is the
+planner's business.
 \emph{No distance and no position enters the prompt}: not the distance to a
-room, not its coordinates, and not which room the agent is standing in. The
-division of labour is strict. The model supplies one probability per
-candidate; weighing the probabilities against travel is the planner's task
-(\cref{sec:rpt}), and the prompt says so in one sentence. The question is
+room, not its coordinates, not its neighbours and not which room the agent is
+standing in. The division of labour is strict. The model supplies one
+probability per candidate, which concerns only whether the target is in that
+room; weighing the probabilities against travel, including walking through a
+room that has already been searched in order to reach another, is the
+planner's task (\cref{sec:rpt}), and the prompt says so. The question is
 repeated, with the name of the target, at the end of the user prompt. The model
 answers in
 JSON with three short pieces of reasoning (where the target is normally found;
@@ -575,79 +579,85 @@ left unexplored (recorded, but not acted upon in the configuration reported
 here), and, for every room, a justification of at most twelve words followed by
 one integer percentage.
 
-\paragraph{Room size and coverage.} Both are computed from the agent's
-occupancy map and the current room partition, with the sight ledger of
+\paragraph{Mapped floor.} The two areas on a room's line are computed from the
+agent's occupancy map and the current room partition, with the sight ledger of
 \cref{sec:mapping}; nothing else enters the computation (no simulator geometry,
 no room annotation, no assumption about how large a room of some type is).
-Every boundary edge of a room, i.e.\ every edge between one of its cells and a
-cell outside it, is classified by the cell beyond it: occupied, part of another
-room, settled unknown, unseen unknown, or free floor that belongs to no room.
-The edges are grouped into four sides along the dominant wall direction of the
-map (or of the room itself when its walls clearly run in another direction). A
-side is \emph{located} when at most $20\%$ of its edges border unseen unknown
-or floor of no room ($30\%$ for a side that was located at the previous update,
-so that a side at the threshold does not alternate); a run of unseen edges at
-most $1.2\m$ wide with located boundary at both ends is not counted when at
-least half of the side is located (it is treated as a doorway in a wall that
-has been observed). When all
-four sides are located the prompt gives the room's area and its two dimensions
-and says that all of its sides are mapped. Otherwise it gives them as a lower
-bound (``at least''), marks each dimension that runs across a side that is not
-located, and says how many sides are not located and how long the unmapped
-boundary is. The area is that of the room's cells plus the cells they
-enclose, such as furniture standing in the room. \emph{Coverage} is the part of
-this area that the camera has observed from at most $4\m$ with a free line of
-sight on the map, at a camera pitch at which an object between $0.3$ and
-$1.0\m$ tall standing on that cell would be in the image; enclosed furniture
-counts in proportion to the observed floor next to it, and enclosed settled
-unknown counts as covered. The prompt gives the
-covered area in square metres, as a share of the room rounded to tens of
-percent, and the area that is left. When the size is a lower bound the share is
-an upper bound and the remainder a lower bound, and the prompt states them as
-such. All of these quantities are recomputed from the map at every update; the
-only state kept between updates is the record of observed cells, which is
-attached to map cells and not to room identifiers, and each side's previous
-verdict. The quantities therefore remain correct when the partition merges,
-splits or renumbers rooms.
+The \emph{floor of a room} is the area of its free cells, i.e.\ floor on which
+the agent can stand. Furniture standing in the room and enclosed pockets of
+unknown space are not counted: floor that the agent cannot reach is not part of
+the room for this purpose. The \emph{mapped} part is the area of those cells
+that the camera has observed from at most $4\m$ with a free line of sight on
+the map, at a camera pitch at which an object between $0.3$ and $1.0\m$ tall
+standing on that cell would be in the image; it is thus the floor on which the
+detector has had the opportunity to see the target. The prompt prints both
+areas and their ratio, e.g.\ \code{mapped=6 of 12 m2 (50\%)}, because a share
+alone does not distinguish a small room from a large one. Areas are rounded to
+whole square metres (to one decimal below $10\sqm$) and the share to tens of
+percent; $100\%$ is printed only when at least $99.5\%$ of the floor has been
+observed. A room whose floor continues beyond the map has frontier clusters,
+and their number is on the same line. All of these quantities are recomputed
+from the map at every update; the only state kept between updates is the
+record of observed cells, which is attached to map cells and not to room
+identifiers. The quantities therefore remain correct when the partition
+merges, splits or renumbers rooms.
 
-``All sides mapped'' is a statement about the map and not a promise about the
-room: it says that no side of the room, as the partition draws it at that
-moment, borders unseen space. It does not say that the partition is settled,
-and the prompt tells the model so (``the map's division into rooms may still
-be revised''). An earlier revision called such a size \emph{final} and told
-the model that the room is ``that big and no bigger'', which the code cannot
-know. In $40$ recorded HM3D validation episodes, $73$ of the $252$ rooms that
-had been reported with all four sides located were more than a quarter larger
-at the end of the episode. Of the $233$ increases of more than a quarter after
-such a report, $178$ followed a merge of two rooms by the partition, $51$ a
-shift of the cut between two rooms, one concerned a fragment, and only three
-were a room that turned out to extend through a side read as located (all
-three within the first $28$ actions of an episode). In all but those three
-cases the additional floor was already on the map at the time of the report,
-listed under a neighbouring room. We therefore changed the wording and not
-the rule: a rule that withheld the statement wherever a side is a cut between
-two rooms would report mapped floor as unmapped, and whether the partition
-will later merge two rooms is not something the map shows.
+\paragraph{Located sides (recorded, no longer shown).} The code also
+determines, for each room, which of its sides have been located, and an
+earlier revision printed the result on the room's line. Every boundary edge of
+a room, i.e.\ every edge between one of its cells and a cell outside it, is
+classified by the cell beyond it: occupied, part of another room, settled
+unknown, unseen unknown, or free floor that belongs to no room. The edges are
+grouped into four sides along the dominant wall direction of the map (or of
+the room itself when its walls clearly run in another direction). A side is
+\emph{located} when at most $20\%$ of its edges border unseen unknown or floor
+of no room ($30\%$ for a side that was located at the previous update, so that
+a side at the threshold does not alternate); a run of unseen edges at most
+$1.2\m$ wide with located boundary at both ends is not counted when at least
+half of the side is located (it is treated as a doorway in a wall that has
+been observed). The earlier line gave the room's area (including the cells it
+encloses, such as furniture) and its two dimensions, said that all sides were
+mapped or gave the size as a lower bound, and stated the covered share as an
+upper bound in the latter case. ``All sides mapped'' was a statement about the
+map and not a promise about the room: in $40$ recorded HM3D validation
+episodes, $73$ of the $252$ rooms that had been reported with all four sides
+located were more than a quarter larger at the end of the episode. Of the
+$233$ increases of more than a quarter after such a report, $178$ followed a
+merge of two rooms by the partition, $51$ a shift of the cut between two
+rooms, one concerned a fragment, and only three were a room that turned out to
+extend through a side read as located (all three within the first $28$ actions
+of an episode). The reading is still computed and kept in the run record; the
+line now gives the mapped floor and the number of frontier clusters instead.
 
 \paragraph{What the prompt supplies, and what it leaves to the model.} The
-system prompt (\cref{app:prompts-oracle}; about $3{,}500$ characters) tells the
-model to use its own reasoning and its own knowledge of standard homes and
-buildings (how they are laid out, and in which rooms furniture and objects of
-each kind are normally found) and to derive every probability from that. Beyond
-this it states \emph{facts} and fixes the reply format. The facts are: what a
-candidate is; that a detector looks for the target in every frame and has not
-found it on the covered floor; which part of a candidate the number is about;
-what each field of a room line measures (for instance, that a room labelled
-\code{unknown} has not been identified and may be of any kind, and that a size
-with all sides mapped can still change when the partition is revised); that
-the numbers are independent across candidates; and what the two ends of the
-scale mean. It contains no knowledge of ours about where objects are and no
-rule of judgement. It names no room for any object, gives no probability, band
-or typical value, does not list the goal categories of any benchmark, states
-no rule for how a field should move a number (what a covered room is worth,
-when an exit matters, how the remaining budget weighs) and contains no worked
-example. The target category of the episode is the only object the model is
-asked about, and it appears in the user prompt of every query.
+system prompt (\cref{app:prompts-oracle}; about $3{,}100$ characters) opens by
+stating whose judgement is wanted (``You reason like a person who knows how
+homes are laid out''), and tells the model to use its own reasoning and its own
+knowledge of standard homes and buildings (in which rooms furniture and
+objects of each kind are normally found) and to derive every probability from
+that. Beyond this it explains the data and fixes the reply format. It says
+what each of the four items of a room line is (for instance, that a room
+labelled \code{unknown} has not been classified and may be of any kind, and
+that only floor the robot can reach counts as a room's floor), what the
+summary line contains, that the numbers are independent across candidates,
+and what the two ends of the scale mean. It also says, in three short
+statements and without any number, what the search so far \emph{means}:
+(a) the more of a room is mapped and the more actions have been spent
+searching it, the less of it is left to hold the target, which can only be on
+the floor that is not mapped yet or behind the room's frontiers;
+(b) a room that was never entered has not been searched, so all of it can
+still hold the target, and the more the other rooms have been searched, the
+more likely the target is in such a room;
+(c) a room's number concerns only whether the target is in that room, and a
+searched room may still be walked through on the way to another.
+These statements were added because a small model does not draw the
+conclusions from the fields alone (\cref{sec:experiments-revisions}); they
+state a direction and no magnitude. The prompt contains no knowledge of ours
+about where objects are: it names no room for any object, gives no
+probability, band, threshold or typical value, does not list the goal
+categories of any benchmark, and contains no worked example. The target
+category of the episode is the only object the model is asked about, and it
+appears in the user prompt of every query.
 
 The wording is specific to a language model: a sentence that a large model
 reads correctly a small one may ignore. The code therefore keeps the prompt as
@@ -659,8 +669,9 @@ room type, contains a number other than those of the reply format, or lacks
 the instruction to use the model's own knowledge (\cref{app:implementation}).
 The version listed in \cref{app:prompts-oracle} is the only one so far. It was
 written for Qwen2.5-3B-Instruct, the model that runs on the development
-machine, and states more of the facts explicitly than a larger model is likely
-to need. \TODO{Write and test a version for the 14B model used in
+machine, and states more explicitly than a larger model is likely to need. Its
+text was replaced once under the same name; the digest printed in
+\cref{app:prompts-oracle} identifies the text that is listed. \TODO{Write and test a version for the 14B model used in
 \cref{sec:results}, and report which version each run used.}
 
 Earlier revisions, including those that produced the numbers of
@@ -674,22 +685,45 @@ probability of a target-landmark node (\cref{sec:nodes}). Apart from the two
 prompts no knowledge of where objects are found reaches the search: the code
 contains no table that maps object categories to rooms.
 
-\paragraph{Parsing.} The percentages are divided by $100$ and clipped to
-$[0, 1-10^{-6}]$. They are \emph{not} normalised: several rooms may each hold
-an instance, and \cref{eq:objective} treats them as independent. Identifiers
-that were not offered are dropped, and a room the model omitted receives
-$1\%$. A reply that cannot be parsed is retried once with a schema reminder;
-if that fails too, or the service is unreachable, the loop does not substitute
-a uniform distribution: the exploration fallback (\cref{sec:fallback}) acts
-and the query is retried after a back-off that starts at $25$ actions and
-doubles up to $200$. Quantities that change continuously (times, the action
-count) are printed in coarse steps so that an unchanged scene produces an
-identical prompt, in which case the previous reply is reused without a call.
+\paragraph{Post-processing of the reply.} The model is not required to write
+exactly what the planner needs. Between the reply and RPT*, the code checks
+the reply's format, scale and meaning. The checks use only the reply and one
+fact about each room (whether the agent has ever been inside it); they contain
+no knowledge of any object category or room type.
+\emph{Format.} The number of a room is read from the key \code{p} or from one
+of a few names that models substitute for it; a number written as text is
+accepted, also with a percent sign. Identifiers that were not offered are
+dropped. A reply that contains no usable number for any offered room is
+retried once with a schema reminder; if that fails too, or the service is
+unreachable, the loop does not substitute a uniform distribution: the
+exploration fallback (\cref{sec:fallback}) acts and the query is retried after
+a back-off that starts at $25$ actions and doubles up to $200$.
+\emph{Scale.} The numbers are percentages. If no number of a reply exceeds $1$
+and at least one lies strictly between $0$ and $1$, the reply was written in
+fractions of one and is multiplied by $100$ (a reply consisting of the
+integers $0$ and $1$ is taken as percentages, as requested). The percentages
+are clipped to $[0,100]$, divided by $100$ and clipped to $[0, 1-10^{-6}]$,
+because the heuristic of RPT* divides by $1-p$. They are \emph{not}
+normalised: several rooms may each hold an instance, and
+\cref{eq:objective} treats them as independent.
+\emph{Meaning.} A room that the model omitted receives $1\%$: it was
+forgotten, not ruled out. A probability of $0$ states that the target cannot
+be in the room. For a room that the agent has entered, this is the model's
+verdict on what was observed there and it is kept; such a room is not offered
+to the planner (see the threshold below). For a room that has never been
+entered, nobody has looked, so a probability below $1\%$ is treated like an
+omission and replaced by $1\%$; the adjustment below then raises it to the
+minimum for a never-entered room. A never-entered room is therefore always a
+candidate, at a probability that permits exploring it but does not compete
+with a room the model is confident about.
+Quantities that change continuously (the action counts) are printed in coarse
+steps, and a reply is reused without a call when the prompt is identical to
+the previous one.
 
-\paragraph{Adjustment by exploration state.} Before the numbers reach the
-planner, the code rescales them by what the agent has already done, as a
-safeguard against a model that ignores the status fields. For a room that was
-never entered, $p \leftarrow \min(1,\,1.5\,p)$ and, if $p>0$, at least $0.15$.
+\paragraph{Adjustment by exploration state.} After these checks, the code
+rescales the numbers by what the agent has already done. For a room that was
+never entered, $p \leftarrow \min(1,\,1.5\,p)$ and at least $0.15$; because of
+the rule above this minimum also holds when the model wrote $0$.
 For a room that was entered and left without being finished,
 \begin{equation}\label{eq:dwell}
   p \;\leftarrow\; p\cdot\max\!\bigl(0.05,\; 0.5\cdot 2^{-\tau/20}\bigr),
@@ -698,11 +732,16 @@ where $\tau$ is the number of actions already spent inside; if $\tau\ge20$ and
 at most one significant frontier is left in the room, the factor is at most
 $0.2$. The room the agent is standing in keeps its number. Rooms whose adjusted
 probability is below $0.05$ are not offered to the planner. These constants are
-hand-set. The prompt does not state these rules, but the model is shown the
-evidence they act on (status, coverage and the actions spent in a room), so
-that evidence may now be counted twice: once by the model and once by the
-code. \TODO{Measure the search without this rescaling, now that the prompt
-leaves the judgement to the model.}
+hand-set. They were introduced as a safeguard against a model that ignores the
+effort already spent in a room. The prompt now tells the model that this
+effort counts against a room (statement (a) above), so for an entered room the
+same evidence can be counted twice, once by the model and once by
+\cref{eq:dwell}. In the paired check of \cref{sec:experiments-revisions} the
+model's share was small: its own number for a room that had been entered and
+left fell from $48\%$ on average after fewer than ten actions inside to $36\%$
+after forty or more, while the factor of \cref{eq:dwell} fell from $0.44$ to
+$0.08$ over the same range. Neither has been changed. \TODO{Decide whether to
+keep both once the MP3D half of that check is available.}
 
 \paragraph{When the model is queried.} The oracle is queried at every loop
 point, i.e.\ whenever a node has been searched and released, and once at the
@@ -1406,30 +1445,102 @@ prompt exists (200 HM3D val episodes, ground-truth perception, a 3B model in
 both roles, room priors still present; its differences were within noise):
 decide whether to report it.}
 
-\paragraph{A probe of the current prompt on a small model.} The only test of
-the current prompt so far is a probe on $19$ hand-written scenarios. Each is a
-partial map with two to six candidates and states one ordinal claim that a
-reasoner who knows homes should satisfy, for instance that a barely seen room
-of unknown type ranks above a room that was covered without the target being
-detected. The claims are not shown to the model. The model was
-Qwen2.5-3B-Instruct on a CPU at temperature $0$, with one call per scenario.
-With the prescriptive prompt the model's numbers satisfied $13$ of the $19$
-claims; with the current prompt they satisfied $9$. All $19$ replies were
-well-formed in both cases. After the adjustment by exploration state
-(\cref{sec:oracle}), which is applied to whatever the model writes, $16$ of
-the $19$ claims were satisfied with either prompt. In two scenarios a room of
-the fitting type has been covered completely without a detection and competes
-with a barely seen room of another type. These were satisfied with the
-prescriptive prompt, which stated the rule, and with none of the fact-only
-wordings we tried: the small model does not draw that conclusion from the
-stated facts, and it is the code's adjustment that ranks the two rooms
-correctly. The small model's own statements of where a target is normally
-found were plausible in most queries and wrong in some (a toilet ``in
-bathrooms or kitchens''). These counts come from single calls on a small set
-of scenarios that we wrote ourselves, and the replies of a small model change
-with small changes of wording, so they indicate a direction and do not
-measure search performance. \TODO{Repeat the probe with the 14B model and a
-version of the prompt written for it.}
+\paragraph{Probes of the prompt on a small model.} Two probes were made of the
+replies of Qwen2.5-3B-Instruct at temperature $0$. Neither measures search
+performance.
+
+\emph{Hand-written scenarios.} A set of $19$ partial maps with two to six
+candidates each states one ordinal claim per map that a reasoner who knows
+homes should satisfy, for instance that a barely seen room of unknown type
+ranks above a room that was covered without the target being detected. The
+claims are not shown to the model. With the prescriptive prompt the model's
+numbers satisfied $13$ of the $19$ claims (CPU, one call per scenario). With
+the prompt of \cref{app:prompts-oracle} and its four-item room line they
+satisfied $13$, and all $19$ replies were well-formed (GPU, one call per
+scenario). The text that it replaced stated what each field of a ten-item
+line is and nothing about what the search so far means; under the same
+conditions it satisfied $6$ claims, and $6$ of its $19$ replies contained the
+three pieces of reasoning but no numbers. We do not read these counts as a
+ranking of wordings. A draft and three variants of it that each changed one
+statement satisfied $6$, $8$, $7$ and $4$ claims; the final text satisfied
+$13$ on a server that had answered other requests before and $9$ when the
+model was loaded afresh for every call; and the replaced text had satisfied
+$9$ in an earlier run on a CPU with another seed. The small model's own statements
+of where a target is normally found were plausible in most queries and wrong
+in some (a toilet ``in bathrooms or kitchens'').
+
+\emph{Recorded queries.} The wording was therefore chosen on recorded data.
+The candidate lists of $100$ queries of a recorded HM3D validation run ($269$
+room lines, with the rooms, areas, frontier counts and action counts that the
+scene graph held at the time) were rendered again and put to the model under
+each candidate wording, the model being loaded afresh for every call so that a
+reply depends on its request alone. Where the target was at the time of a
+query is not known, so no claim can be checked; what is counted is what the
+replies are. Under the replaced text $91$ of the $100$ replies were usable
+without a retry, the model put $22\%$ of the never-entered rooms at zero, and
+it gave the rooms the agent had been inside a higher number on average than
+the rooms it had never entered ($41\%$ against $35\%$). Under the text of
+\cref{app:prompts-oracle} $98$ replies were usable without a retry and the
+order of the two averages was reversed ($39\%$ for entered rooms against
+$54\%$ for never-entered ones); the rank correlation of an entered room's
+number with the actions spent inside it was $-0.24$ ($-0.21$ before) and with
+the share of its floor that was mapped $-0.28$ ($-0.22$ before). Two things
+did not improve: the model left $6\%$ of the listed rooms without a number
+($2\%$ before), and it still put $25\%$ of the never-entered rooms at zero.
+Both are handled by the checks of \cref{sec:oracle} and not by the wording.
+Three one-sentence differences between candidates are worth recording; each
+is a single comparison on the same $100$ queries and not an established
+effect. With the sentence ``the search goes on, so it has not been found
+yet'', $44\%$ of the zeros the model wrote were justified by the target not
+having been found in the room (``no toilet found there yet''), against $18\%$
+under the replaced text; with ``so the target is in a place the robot has not
+seen yet'' the share was $18\%$ again. Every reply that omitted rooms scored
+exactly one room, the last one listed ($56$ of $56$ such replies over all
+candidates); a closing question in the singular produced $11$ such replies and
+a question that names the number of rooms $5$. Asking about ``the part of
+that room the robot has not seen yet'' instead of ``that room'' reduced the
+zeros on never-entered rooms from $32\%$ to $25\%$.
+\TODO{Repeat both probes with the 14B model and a version of the prompt
+written for it.}
+
+\paragraph{A paired check of the prompt, the room line and the reply checks.}
+The three changes of \cref{sec:oracle} (the text of the prompt, the four-item
+room line and the post-processing of the reply) were compared together against
+the revision before them on the same $90$ single-storey HM3D validation
+episodes ($19$ scenes, sampled once), with ground-truth perception,
+Qwen2.5-3B-Instruct for both queries, one seed, and the model loaded afresh
+for every query so that an answer depends on its request alone. Four episodes
+of each arm that were run twice came out identical. The success rate was
+$86.7\%$ before and $87.8\%$ after (difference $+1.1$ points, $95\%$ bootstrap
+interval $[-4.4, +6.7]$; four episodes gained, three lost) and the SPL $0.431$
+and $0.460$ ($+0.029$, $[-0.015, +0.072]$); $34$ of the $90$ episodes ran
+identically. Neither difference is significant. A probability query took
+$3.1$\,s on average with either prompt, not counting the model load: the
+prompt shrank from $1{,}331$ to $973$ tokens, but generating the reply
+dominates. Replies that needed the retry fell from $0.24$ to $0.04$ per
+episode. The behaviour changed in one respect. The agent chose a room it had
+never entered in $77\%$ of its room choices against $70\%$ ($3.0$ against
+$2.5$ per episode; interval of the difference $[+0.12, +0.93]$), while the
+number of returns to a room in which it had already spent $20$ actions did not
+change ($2.8$ per episode in both). This is mostly the effect of the check and
+not of the wording: with either text the model put $36\%$ of the never-entered
+rooms at zero, and before the change such a room was not offered to the
+planner ($66\%$ of the never-entered rooms were offered, against $99\%$
+after).
+
+The same check shows what the adjustment by exploration state does to rooms
+that were entered and left. We laid the dataset's goal positions over the
+recorded room partitions; this analysis uses privileged data and is not part
+of the method. Of the $132$ such rooms to which the model gave $50\%$ or more,
+$12$ ($9\%$) were the room that held the target, against $7\%$ of all rooms
+that had been entered and left: the small model does not identify which
+searched room deserves a second look. The adjustment put $7$ of the $132$
+below the offer threshold, none of them the target's room, and in none of the
+$11$ failed episodes had it hidden the target's room against the model's
+number. \TODO{Add the MP3D half of this check ($90$ single-storey episodes),
+which was running at the time of writing. The check measures the three changes
+together: separate their effects, and repeat it with learned perception and
+with the 14B model.}
 
 \paragraph{Both runs: closing rules shaped by the benchmark's scoring.} At the
 time of both runs the closing behaviour contained three rules that moved the
@@ -1856,19 +1967,21 @@ evaluated end to end. Misses, false positives and confusions of a learned
 detector affect every stage: the room labels, the descriptions shown to the
 language model, the target candidates and the decision to stop.
 
-\paragraph{The model's judgement is untested, and is still adjusted by hand.}
+\paragraph{The model's judgement is barely tested, and is still adjusted by hand.}
 The prompt of the probability query now leaves the judgement about where a
 target is to the language model (\cref{sec:oracle}), but the method in this
-form has not been run on a benchmark: the reported numbers were obtained with
-a prescriptive prompt. Whether the model's unaided numbers order the rooms as
-well as the hand-written rules did is open, and it depends on the model: in a
-small probe (\cref{sec:experiments-revisions}) the numbers of a 3B model
-satisfied fewer of our ordinal claims without the rules ($9$ of $19$ against
-$13$), and the same number ($16$) once the code's adjustment by exploration
-state had been applied. The code still rescales the model's numbers by exploration
-state and fixes the probability of a target-landmark node, and the room types
-the model reads come from a fixed vocabulary. How much of the behaviour is the
-model's own judgement has not been measured.
+form has not been run on a full benchmark: the reported numbers were obtained
+with a prescriptive prompt. The only evidence so far comes from a 3B model
+(\cref{sec:experiments-revisions}): probes of its replies, and a paired check
+on $90$ HM3D episodes in which the current prompt, room line and reply checks
+did not differ significantly from the revision before them. In that check the
+model put a third of the never-entered rooms at zero and did not identify
+which of the rooms already searched held the target, so the order of the
+search still rests to a large part on the code: the minimum for a
+never-entered room, the rescaling by exploration state and the fixed
+probability of a target-landmark node. The room types the model reads come
+from a fixed vocabulary. How much of the behaviour is the model's own
+judgement has not been measured, and it is likely to depend on the model.
 
 \paragraph{No held-out evaluation.} Rules and thresholds were developed on the
 evaluated validation episodes (\cref{sec:experiments-privileges}).
@@ -2343,12 +2456,14 @@ Label refresh period & $50$ actions \\
 Strong label & $\ge2$ object classes, confidence $\ge0.65$ \\
 Geometry-only label & $\ge2\sqm$; elongation $\ge2.5$ or $\ge2$ doorways \\
 Side of a room located: unseen share of its edges; doorway not counted & $\le20\%$ ($\le30\%$ once located); $\le1.2\m$ \\
-Covered floor: range; height band of an object in view & $\le4\m$; $0.3$--$1.0\m$ \\
+Mapped floor: range; height band of an object in view & $\le4\m$; $0.3$--$1.0\m$ \\
 \midrule
 \multicolumn{2}{@{}l}{\emph{Probabilities and ordering}
 (\cref{sec:nodes,sec:oracle,sec:rpt})} \\
 Object classes shown per room & $\le8$ \\
 Probability of an omitted room & $1\%$ \\
+Never-entered room given under $1\%$ by the model & read as $1\%$ \\
+Reply read as fractions of one & no number above $1$, one in $(0,1)$ \\
 Never-entered room: factor, floor & $1.5$, $0.15$ \\
 Entered room: factor, half-life, floor & $0.5$, $20$ actions, $0.05$ \\
 Entered room, $\ge20$ actions and $\le1$ frontier & factor $\le0.2$ \\
@@ -2469,27 +2584,27 @@ Classify this room.
 
 \subsection{Per-room probabilities}\label{app:prompts-oracle}
 %%PROMPT-BEGIN:oracle-version%%
-Prompt version \code{facts-qwen2.5-3b-v1}, written for \code{qwen2.5:3b-instruct}; SHA-256 of its text \code{3ee6c00c94dc1753}\ldots{} System prompt.
+Prompt version \code{facts-qwen2.5-3b-v1}, written for \code{qwen2.5:3b-instruct}; SHA-256 of its text \code{2d025f019f981fe5}\ldots{} System prompt.
 %%PROMPT-END:oracle-version%%
 %%PROMPT-BEGIN:oracle-system%%
 \begin{lstlisting}[style=prompt]
-You are the reasoning module of a robot that searches a building for one object. The TARGET line names it. The robot has mapped part of the building and divided the map into rooms. Each line under NODES is one place it can search next: a room, together with the unseen space its exits open onto. A detector looks for the target in every camera frame; on the floor a line lists as covered it has looked and not found it. For every node, estimate the probability, in percent, that the target is in the part of it not checked yet: the floor of the room that is left, and the unseen space behind its exits.
+You reason like a person who knows how homes are laid out. You are the reasoning module of a robot that searches a building for one object. The TARGET line names it. The robot has mapped part of the building and divided the map into rooms. Each line under NODES is one room it can search next. A detector checks every camera frame for the target, so the target is in a place the robot has not seen yet. For every node, estimate the probability, in percent, that the target is in the part of that room the robot has not seen yet.
 
-Use your own reasoning and your own knowledge of standard homes and buildings: how they are laid out, and in which rooms furniture and objects of each kind are normally found. Decide for yourself where this target makes sense, read what each line says about its room, and derive every probability from that. No rules and no typical values are supplied: the judgement is yours.
+Use your own reasoning and your own knowledge of standard homes and buildings: in which rooms furniture and objects of each kind are normally found. Decide for yourself where this target makes sense, read what each line says about its room, and derive every probability from that. No numbers are supplied: the judgement is yours.
 
 Fields of a room line:
-type= the room's classification, inferred from the objects seen in it. "unknown": the robot has not determined yet what kind of room this is; it may be any kind. A trailing "?": tentative, the evidence is thin.
-size= floor area and dimensions on the current map. "all sides mapped": no part of the room lies outside the map, though the map's division into rooms may still be revised. "at least": a side is not mapped yet and the room continues beyond it ("+": that dimension is cut short; "open edge": the length of the unmapped side).
-covered= floor of the room the detector has already checked: its area and its share of the room. "left": floor it has not checked yet.
-frontier= boundaries to unexplored space that the robot can reach inside the room.
-exits= doorways and gaps on the room's edge that lead to space not seen yet; in brackets, how many are at a door frame and how much unseen floor lies behind them. "glimpsed through its exits:" objects detected beyond them, outside this room.
-status= never_entered (seen from outside only), entered (the robot has been inside), or scanned(<how>, <how long ago>) (its look at the room is complete; <how> says in what way).
-searched= how long the robot has spent inside the room so far.
-connected to: the types of the rooms it is joined to by a door or a doorway.
-seen: the kinds of object detected in the room so far ("xN": N of a kind; "+N more": kinds not listed).
-The HOUSE line summarises the building so far: room types found and their status, rooms not identified, openings (exits of any room) not yet looked into, whether unexplored frontier is reachable, and actions used out of the budget.
+type= the room's classification. A trailing "?": tentative. "unknown": not classified yet, so it may be any kind; the objects seen in it so far are listed in brackets ("xN": N of a kind).
+mapped= the floor of the room the robot has already seen, out of all its floor, in square metres and as a percentage. Only floor the robot can reach counts.
+frontier= how many places are left in the room where the mapped floor borders space not seen yet.
+searched= how many actions the robot has already spent searching inside the room. "never": it has not entered the room.
+The HOUSE line sums up the building so far: the types of the rooms found and whether each was entered or scanned (its search is complete), rooms not classified, openings (doorways and gaps) not yet looked into, whether unexplored frontier is reachable, and the actions used out of the budget.
 
-Judge every node on its own: several may each hold a target, so the numbers are independent and need not sum to 100. Leave travel out: a planner weighs your probabilities against the distances. Score every id given, and no other.
+What the search so far means:
+The more of a room is mapped and the more actions were spent searching it, the less of it is left to hold the target: the target can only be on its floor not mapped yet or behind its frontiers.
+A room never entered has not been searched, so all of it can still hold the target. The more the other rooms have been searched, the more likely the target is in a room not entered yet.
+A room's number says only whether the target is in that room. Leave travel out: a planner weighs your probabilities against the distances, and it may pass through a searched room on the way to another.
+
+Judge every node on its own: several may each hold a target, so the numbers are independent and need not sum to 100. Score every id given, and no other.
 Reply with ONLY this JSON, keys in this order, ending with one "nodes" entry per node:
 {"home":"<where this target is normally found, max 12 words>","house":"<what the rooms found say about this building, max 25 words>","stage":"<how far the search has got, max 20 words>","pass":"first|second","nodes":[{"id":<int>,"why":"<reason, max 12 words>","p":<int 0-100>}, ...]}
 "p": the probability in percent, from 0 (certain the target is not there) to 100 (certain it is).
@@ -2497,9 +2612,10 @@ Reply with ONLY this JSON, keys in this order, ending with one "nodes" entry per
 \end{lstlisting}
 %%PROMPT-END:oracle-system%%
 User prompt template. \code{\{house\}} is the summary line and
-\code{\{nodes\}} one line per room in the format shown in the example at the
-end of the system prompt; \code{\{storeys\}} is empty in the single-storey
-configuration.
+\code{\{nodes\}} one line per room with the four items explained in the system
+prompt, for example
+\code{id=3\ \ ROOM\ \ type=bedroom?\ \ mapped=3.3 of 8.0 m2 (40\%)\ \ frontier=1\ \ searched=10 actions}
+(the example is ours and is not part of any prompt).
 %%PROMPT-BEGIN:oracle-user%%
 \begin{lstlisting}[style=prompt]
 TARGET: {target}
@@ -2509,7 +2625,7 @@ HOUSE: {house}
 NODES ({n}):
 {nodes}
 
-For each of the {n} nodes: how likely is it that the target ({target}) is in the part of it not checked yet? Score them independently. JSON only.
+For each of the {n} nodes above: how likely is it that the target ({target}) is in the part of that room not seen yet? Score all {n}, independently. JSON only.
 \end{lstlisting}
 %%PROMPT-END:oracle-user%%
 

@@ -15,61 +15,54 @@ the record and never rendered), and the model is told that travel is the
 planner's.
 
 **The model's own knowledge, and none of ours (since 2026-11-16).** The
-system prompt tells the model to use its own reasoning and its own knowledge
-of standard homes and buildings -- how they are laid out, in which rooms
-furniture and objects of each kind are found -- and to derive every
+system prompt opens by saying whose judgement is wanted -- a person's who
+knows how homes are laid out -- and tells the model to use its own reasoning
+and its own knowledge of standard homes and buildings, in which rooms
+furniture and objects of each kind are found, and to derive every
 probability from that. It holds no category knowledge: no room named as the
 place of any object, no number or band a probability should fall in, no list
 of a benchmark's goal categories, no count of rooms a home has, no worked
 example. The only object it ever sees named is the one on the ``TARGET:``
 line of the user prompt -- the name of the object the current episode
-searches for (``TargetLabels.query``), given in every call. What the system
-prompt does hold is what a model cannot know: what each field of a line
-means, what the reply looks like, and that the numbers are independent. The
-conclusions -- what a covered room is worth, what an exit promises, when a
-second look pays -- are the model's. Until that day the prompt was 14,751
-characters of them: the rooms of each HM3D goal category, the rooms a
-typical home has, a band of numbers for every room status, "coverage first,
-time second", and a worked example (``CHANGELOG.md`` 2026-11-16, "the
-oracle's prompt").
+searches for (``TargetLabels.query``), given in every call. Until that day
+the prompt was 14,751 characters of our conclusions: the rooms of each HM3D
+goal category, the rooms a typical home has, a band of numbers for every
+room status, "coverage first, time second", and a worked example
+(``CHANGELOG.md`` 2026-11-16, "the oracle's prompt").
 
-**What a room line holds: everything the scene graph stores about the room,
-except distance.** Its type (``unknown`` while unidentified, ``?`` on a
-type that rests on one kind of object); its size and how much of it the
-camera has covered (the room extents, ``room_extent.py``: the agent's own
-occupancy map and partition); the frontier left in it; its exits to unseen
-space, how many stand at a door frame, the unseen floor behind them and what
-was glimpsed through them; its status (never entered, entered, scanned and
-how long ago); the effort spent inside; the types of the rooms a door or
-doorway joins it to (the graph's edges); and the objects detected in it,
-with their counts. Left out, and why: the room's centroid, the lines its
-walls stand on and the agent's distance to each (position is distance), how
-long ago the robot was last inside (where the robot is), the classifier's
-confidence (the ``?`` is its reading), and the bookkeeping (ids of doors,
-partition revisions, the previous round's numbers).
+**What the data means, said in words (since 2026-11-17).** Beside what each
+field of a line is, the prompt says what the search so far means for a
+room, because a small model does not draw it from the fields alone (under
+the facts-only wording of 2026-11-16 the 3B scored the rooms it had entered
+above the rooms it had never entered, 41 % against 35 % on average over a
+hundred recorded queries; under this one, 39 % against 54 %): the more of a
+room is mapped and the more actions were spent searching it, the less of it
+is left to hold the target -- its floor not mapped yet and what lies behind
+its frontiers; a room never entered has not been searched, and is the
+likelier the more the other rooms were searched; and a room's number is
+about the target being IN the room -- walking through a searched room to
+reach another is the planner's affair. No number, no threshold and no
+example goes with any of it.
 
-**"Mapped", not "final".** A room whose four sides are all located reads
-``size=12m2 (4x3m, all sides mapped)``; one with a side the camera has not
-reached reads ``size=at least 12m2 (5+ x 3m, 1 of 4 sides not mapped yet,
-open edge 2m)``. As first written (the room extents, earlier on 2026-11-16)
-the first read "all walls seen" and the
-prompt called it FINAL -- "the room is that big and no bigger". That
-promised more than the reading knows: of 252 rooms so declared in 40 HM3D
-recordings, 73 were over a quarter bigger by the end of the episode. Of the
-233 growths behind that, 229 were the PARTITION changing (178 merges of two
-rooms, 51 moved cuts) -- floor that was mapped, and listed under the
-neighbouring room, all along -- and 3 a side read as located that was not.
-What the extents know is that no side of the room opens onto unmapped space;
-they cannot know that the watershed will not join it to its neighbour. The
-words now say the first and the prompt says the second, in one clause. The
-alternative -- withholding the verdict wherever a side is a cut rather than
-a wall -- would have told the model that mapped floor is unmapped.
+**What a room line holds: four things (since 2026-11-17).** Its type --
+``unknown`` while unclassified, and then, only then, the objects seen in it;
+``?`` on a tentative type; the floor mapped out of the room's floor, in
+square metres and as a share (``mapped=6 of 12 m2 (50%)``: the observed
+part of the room's FREE floor, ``room_extent.py`` -- furniture and pockets
+the robot cannot stand on are not the room's floor); the frontiers left in
+it; and the effort spent inside, ``never`` for a room not entered. Until
+that day the line held everything the scene graph stores about the room
+except distance: its size and the sides not mapped, its exits and what was
+glimpsed through them, a status word, the rooms a door joins it to, its
+objects with their counts and a note when the target's kind was detected in
+it. All of that is still on the :class:`SearchNode`, for the recording;
+which rooms a room is joined to and how far anything is are the planner's,
+and are not the model's to read.
 
 **One unit of effort.** With :attr:`SearchContext.action_time_s` given, the
-durations on a line are written in actions (``searched=40 actions``,
-``scanned(full rotation, 120 actions ago)``), the unit the HOUSE line's
-budget is in; without it, in time (``40s``, ``2min``). Both in the same
-coarse steps, so an unchanged map gives an unchanged prompt.
+effort on a line is written in actions (``searched=40 actions``), the unit
+the HOUSE line's budget is in; without it, in time (``40s``, ``2min``). In
+coarse steps, so the line does not change with every action.
 
 **The reply** is ``{"home", "house", "stage", "pass", "nodes": [{"id",
 "why", "p"}]}``, unchanged: three short readings in the model's words, kept
@@ -78,13 +71,23 @@ and one integer percentage per node. The percentages are independent
 per-node estimates, not shares of one distribution, and are handed to RPT*
 without renormalisation.
 
-What stays in code is the contract, never the judgement: parse and clamp,
-drop invented ids, give an omitted node a small share rather than zero,
-derive joint failure under RPT*'s independence approximation, refuse a reply
-with no usable node (the caller repairs the schema once, then backs off),
-and reuse the last reply when the prompt is byte-identical. One arithmetic
-floor remains as a knob and is OFF by default (``unexplored_floor``, the 3B
-era's guard against never-entered rooms written off at 0-1 %).
+**Between the reply and RPT* (:meth:`SearchNodeOracle.score`).** The model
+need not write exactly what the planner takes; the code makes it so, from
+the reply and the nodes alone and with no knowledge of any room or object.
+*Format*: the number under ``p`` or a name a model drifts to, as a number
+or as text, a percent sign after it; invented ids dropped; a reply with no
+usable node refused (the caller repairs the schema once, then backs off --
+never a made-up distribution). *Scale*: percentages, also when the reply
+was written in fractions of one, clamped into 0-100 and below 1 as
+probabilities (RPT*'s heuristic divides by ``1 - p``). *Meaning*: a node the
+model left out is forgotten, not ruled out (a small share); **a room never
+entered is never zero** (:func:`keep_unentered`: nobody has looked, so
+"certain it is not there" is read as not given, and the loop's floor for
+such a room then holds), while the zero of a room the robot has been inside
+stands and keeps that room out of the order. The last reply is reused when
+the prompt is byte-identical. One older floor remains as a knob and is OFF
+by default (``unexplored_floor``). What the loop does to the numbers after
+this -- by exploration state -- is ``RoomSearchLoop._scaled_values``.
 
 An **opening** -- a doorway or gap at the edge of the mapped floor -- is a
 node of its own only under the deprecated exits-as-nodes mode
@@ -153,22 +156,28 @@ class SearchNode:
             ``gap`` for an opening.
         tentative: The room type rests on a single kind of object (a weak
             label); rendered as ``type=kitchen?`` so the model can weigh it.
-        area_m2: Room floor area; 0 when unknown.
+        area_m2: Room: its floor area -- the free cells the partition gives
+            it, floor the robot can stand on (the furniture standing in the
+            room and the pockets nothing can enter are not counted); 0 when
+            unknown. The total of the line's ``mapped=``.
         frontier_clusters: Unexplored boundary clusters left in the room.
         searched_s: Seconds the robot has spent inside the room. Rendered in
             actions when the context gives the action time
-            (``searched=40 actions``), else in time (``searched=40s``).
+            (``searched=40 actions``), else in time (``searched=40s``); a
+            room never entered reads ``searched=never``.
         last_inside_ago_s: Seconds since it was last inside; None = never.
-            Read for the status word only (``never_entered`` / ``entered``):
-            how long ago the robot left a room says where the robot is.
+            Read for one thing only: whether the room was ever entered
+            (``searched=never``). How long ago the robot left a room says
+            where the robot is, and is not shown.
         here: The robot stands in this room now. For the record: NEVER
             rendered -- the room the robot stands in is the room at distance
             zero, and distance is the planner's (``here=yes`` was on the
             line until 2026-11-16).
         objects: The confirmed objects in the room, one entry per object, so
-            a class repeats as often as it was found; rendered with the
-            counts, most numerous first (``seen: chair x4, table``). For an
-            opening, the classes glimpsed through it.
+            a class repeats as often as it was found. On the line only while
+            the room is not classified (``type=unknown (seen: chair x4,
+            table)``, most numerous first): a classified room's type stands
+            for them. For an opening, the classes glimpsed through it.
         via: Opening: the mapped room it opens from, in prompt words --
             ``room 6 (type=bathroom?)`` -- or None when unknown.
         scanned: How the room was finished by the scan ledger, in prompt
@@ -233,11 +242,24 @@ class SearchNode:
         target_seen: Room: an object of the target's own kind is among the
             confirmed objects of this room -- the detector found it and the
             search goes on all the same (the closing let it go: no route, a
-            failed inspection). True is rendered as ``target: detected
-            here, not reached``; False and None (not known) render nothing,
-            so a line without the note is a room in which the detector has
-            NOT found the target -- which is what lets the prompt say that
-            the covered floor was looked at without finding it.
+            failed inspection). For the record since 2026-11-17: not on the
+            line (until then True read ``target: detected here, not
+            reached``); a confirmed target is a landmark node of the loop's
+            own, at a fixed probability, without the model.
+        observed_m2: Room: how much of ``area_m2`` -- the free floor, the
+            cells the robot can stand on -- the camera has seen from within
+            detection range with a clear line of sight (the sight ledger's
+            per-cell record, ``RoomExtent.observed_m2``), square metres.
+            Unlike ``covered_m2`` it counts no furniture island and no
+            settled pocket: floor the robot cannot reach is not part of the
+            room. Rendered with ``area_m2`` as ``mapped=6 of 12 m2 (50%)``.
+            None when the record was not read: ``mapped=unknown of 12 m2``.
+
+    **What a room line carries (since 2026-11-17): four things** -- ``type=``,
+    ``mapped=``, ``frontier=`` and ``searched=`` (:func:`format_node`). Every
+    other attribute here is kept for the recording and for the code that
+    builds nodes, and is not shown to the model; where an attribute's
+    description says "rendered as", that was its place on the line until then.
     """
 
     id: int
@@ -270,6 +292,7 @@ class SearchNode:
     open_perimeter_m: float = 0.0
     connected: Tuple[str, ...] = field(default_factory=tuple)
     target_seen: Optional[bool] = None
+    observed_m2: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -353,7 +376,9 @@ class NodeOracleResult:
             say about the building), ``stage`` (how far the search has got)
             and ``pass``. Kept so the recording shows the judgement behind
             the distribution; nothing reads them for a decision.
-        floored: Node ids raised to the uncertainty floor (when it is on).
+        floored: Node ids whose number the code raised: a room never entered
+            that the model put at zero (:func:`keep_unentered`), and -- when
+            the optional floor is on -- the unexplored nodes under it.
         pass_verdict: The model's ``pass`` -- :data:`PASS_FIRST` while what
             is left unexplored is worth more than re-checking the rooms
             already scanned, :data:`PASS_SECOND` once it is not -- or None
@@ -451,31 +476,68 @@ def kinds(names: Sequence[str]) -> Tuple[str, ...]:
 
 
 def format_node(node: SearchNode, action_time_s: Optional[float] = None) -> str:
-    """One prompt line for ``node``: everything stored about it but where it is (see the module docstring)."""
+    """One prompt line for ``node``. A room's line holds four things and nothing else (since 2026-11-17).
+
+    * ``type=`` -- the room's classification, ``?`` on a tentative one. A
+      room not classified yet reads ``unknown`` and, then only, lists the
+      objects seen in it: ``type=unknown (seen: chair x4, table)``.
+    * ``mapped=`` -- :func:`format_mapped`: the floor already seen out of
+      the room's floor, in square metres and as a share.
+    * ``frontier=`` -- the frontier clusters left in the room.
+    * ``searched=`` -- the effort already spent inside
+      (:func:`coarse_duration`), ``never`` for a room never entered.
+
+    Which rooms a room is joined to and how far anything is are the
+    planner's and are not on the line; nor are the exits, the status word or
+    the objects of a classified room, which the node still carries for the
+    record.
+    """
     if node.kind == OPENING:
         glimpsed = counted(kinds(node.objects), MAX_CLASSES_IN_PROMPT) or "nothing yet"
         origin = "off %s" % node.via if node.via else "off the mapped floor"
         return "  ".join(["id=%d" % node.id, "OPENING", "%s %s" % (node.label or "gap", origin),
                           "to space NOT seen yet", "glimpsed through it: %s" % glimpsed])
-    label = node.label + ("?" if node.tentative and node.label != "unknown" else "")
-    parts = ["id=%d" % node.id, "ROOM", "type=%s" % label, "size=%s" % format_size(node)]
-    coverage = format_coverage(node)
-    if coverage:
-        parts.append("covered=%s" % coverage)
-    parts += ["frontier=%d" % max(0, int(node.frontier_clusters)),
-              "exits=%s" % format_exits(node.exits, node.doorways, node.unseen_m2),
-              "status=%s" % node.status_words(action_time_s),
-              "searched=%s" % coarse_duration(node.searched_s, action_time_s)]
-    connected = counted(node.connected)
-    if connected:
-        parts.append("connected to: %s" % connected)
-    parts.append("seen: %s" % (counted(node.objects, MAX_CLASSES_IN_PROMPT) or "nothing yet"))
-    if node.target_seen:
-        parts.append("target: detected here, not reached")
-    glimpsed = counted(kinds(node.glimpsed), MAX_CLASSES_IN_PROMPT)     # kinds, not counts: an exit shows a class, not a census
-    if glimpsed:
-        parts.append("glimpsed through its exits: %s" % glimpsed)
-    return "  ".join(parts)
+    label = (node.label or "unknown").strip() or "unknown"
+    if label.lower() == "unknown":
+        label = "unknown (seen: %s)" % (counted(node.objects, MAX_CLASSES_IN_PROMPT) or "nothing yet")
+    elif node.tentative:
+        label += "?"
+    searched = None if node.last_inside_ago_s is None else node.searched_s
+    return "  ".join(["id=%d" % node.id, "ROOM", "type=%s" % label, "mapped=%s" % format_mapped(node),
+                      "frontier=%d" % max(0, int(node.frontier_clusters)),
+                      "searched=%s" % coarse_duration(searched, action_time_s)])
+
+
+def format_mapped(node: SearchNode) -> str:
+    """The ``mapped=`` value of a room line: ``6 of 12 m2 (50%)`` -- results the model reads and does not compute.
+
+    The second number is the room's floor (:attr:`SearchNode.area_m2`: free
+    cells only, floor the robot can stand on), the first how much of it the
+    camera has seen from detection range (:attr:`SearchNode.observed_m2`),
+    and the share is theirs: a room of 4 m2 and one of 40 m2 can both stand
+    at 50 %, which is why the areas are said too. Whole square metres from
+    ten up and one decimal under it, where a whole number says too little
+    (``1.0 of 1.2 m2``); the share in tens, with ``100%`` kept for a room
+    seen whole -- and the mapped part then never reads as the whole floor
+    under it (``11 of 12 m2 (90%)``, not ``12 of 12``). Without the
+    observation record the first number is ``unknown``; a room of no known
+    size reads ``unknown``.
+    """
+    total = max(0.0, float(node.area_m2))
+    if total <= 0.0:
+        return "unknown"
+    step = 1.0 if total >= 9.95 else 0.1
+    places = "%.0f" if step == 1.0 else "%.1f"
+    whole = places % max(total, step)                # a sliver of a few cells is not a room "of 0.0 m2"
+    if node.observed_m2 is None:
+        return "unknown of %s m2" % whole
+    seen = max(0.0, min(total, float(node.observed_m2)))
+    share = seen / total
+    percent = 100 if share >= 0.995 else min(90, int(share * 10.0 + 0.5) * 10)
+    part = whole if percent == 100 else places % seen
+    if percent < 100 and part == whole:
+        part = places % (float(whole) - step)
+    return "%s of %s m2 (%d%%)" % (part, whole, percent)
 
 
 def coarse_metres(value: float, step: float = 0.5) -> str:
@@ -597,25 +659,59 @@ def system_prompt(nodes: Sequence[SearchNode], context: Optional[SearchContext] 
 
 
 # -- the parse --------------------------------------------------------------
-def _percent(entry: Dict[str, Any]) -> Optional[float]:
-    """The node's share in percent, from ``p`` or one of the field names a model drifts to."""
+def _raw(entry: Dict[str, Any]) -> Optional[Tuple[float, str]]:
+    """The number ``entry`` gives for its node and the key it stands under, or None when there is none to read.
+
+    ``p``, or one of the field names a model drifts to; a number written as
+    text is read (``"40"``), with a percent sign after it too (``"40%"``).
+    """
     for key in ("p", "probability", "percent", "score"):
         if key in entry:
+            value = entry[key]
+            if isinstance(value, str):
+                value = value.strip().rstrip("%").strip()
             try:
-                value = float(entry[key])
+                value = float(value)
             except (TypeError, ValueError):
                 return None
-            if not math.isfinite(value):
-                return None
-            if key == "probability" and value <= 1.0:
-                value *= 100.0                       # a fraction in a field named probability
-            return max(0.0, min(100.0, value))
+            return (value, key) if math.isfinite(value) else None
     return None
+
+
+def _percent(entry: Dict[str, Any], unit_scale: bool = False) -> Optional[float]:
+    """The node's share in percent, 0-100, from what :func:`_raw` reads.
+
+    A fraction of one is turned into a percentage when the field is named
+    ``probability`` or when the whole reply was written that way
+    (``unit_scale``, :func:`written_as_fractions`).
+    """
+    raw = _raw(entry)
+    if raw is None:
+        return None
+    value, key = raw
+    if unit_scale or (key == "probability" and value <= 1.0):
+        value *= 100.0
+    return max(0.0, min(100.0, value))
+
+
+def written_as_fractions(rows: Sequence[Any]) -> bool:
+    """Whether a reply's numbers are fractions of one (``0.4``) where percentages (``40``) were asked for.
+
+    Read off the reply as a whole, never off one entry: no number above 1,
+    and at least one strictly between 0 and 1. Whole numbers alone -- a reply
+    of ``0`` and ``1`` -- are percentages as asked: a model that means "one
+    percent" is not to be read as certain.
+    """
+    values = [raw[0] for raw in (_raw(row) for row in rows if isinstance(row, dict)) if raw is not None]
+    return bool(values) and max(values) <= 1.0 and any(0.0 < value < 1.0 for value in values)
 
 
 def parse_reply(reply: Any, nodes: Sequence[SearchNode]) -> Optional[Tuple[Dict[int, float], float, Dict[int, str], Tuple[int, ...]]]:
     """The scores, elsewhere, reasons and omitted ids in ``reply``, or None when unusable.
 
+    The scores are percentages whatever the model wrote them as: a number
+    as text, a percent sign, a reply in fractions of one
+    (:func:`written_as_fractions`), a value outside 0-100 (clamped).
     Invented ids are dropped. A listed node the model skipped is given
     :data:`OMITTED_PERCENT` -- forgotten, not ruled out. A reply that scores
     no listed node at all is unusable. An explicit all-zero belief is valid:
@@ -625,8 +721,7 @@ def parse_reply(reply: Any, nodes: Sequence[SearchNode]) -> Optional[Tuple[Dict[
     if not isinstance(rows, list):
         return None
     known = {int(n.id) for n in nodes}
-    scores = {}  # type: Dict[int, float]
-    reasons = {}  # type: Dict[int, str]
+    listed = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -634,9 +729,13 @@ def parse_reply(reply: Any, nodes: Sequence[SearchNode]) -> Optional[Tuple[Dict[
             nid = int(row.get("id"))
         except (TypeError, ValueError):
             continue
-        if nid not in known:
-            continue
-        value = _percent(row)
+        if nid in known:
+            listed.append((nid, row))
+    unit_scale = written_as_fractions([row for _, row in listed])
+    scores = {}  # type: Dict[int, float]
+    reasons = {}  # type: Dict[int, str]
+    for nid, row in listed:
+        value = _percent(row, unit_scale)
         if value is None:
             continue
         scores[nid] = value
@@ -685,6 +784,31 @@ def parse_pass(reply: Any) -> Optional[str]:
         if any(word in text for word in _PASS_WORDS[verdict]):
             return verdict
     return None
+
+
+def keep_unentered(scores: Dict[int, float], nodes: Sequence[SearchNode]) -> Tuple[Dict[int, float], Tuple[int, ...]]:
+    """A room never entered is never handed on at zero; return the new scores and the ids raised.
+
+    A zero says "certain the target is not there". Of a room the robot has
+    been inside that is the model's verdict on what was looked at, and it
+    stands: the room is then no node for the planner (the loop offers
+    nothing under ``LoopSettings.min_prob``). Of a room seen from outside
+    only it is more than anybody knows, so a number under
+    :data:`OMITTED_PERCENT` is read as not given -- small, not nothing --
+    and the loop's floor for a room never entered
+    (``LoopSettings.unvisited_floor``) then holds for it as for every other
+    such room, which is what keeps it in the order. The rule reads one fact,
+    whether the robot was ever inside (:attr:`SearchNode.last_inside_ago_s`),
+    and nothing about what the room or the target is.
+    """
+    out = dict(scores)
+    raised = []
+    for node in nodes:
+        nid = int(node.id)
+        if node.kind == ROOM and node.last_inside_ago_s is None and nid in out and out[nid] < OMITTED_PERCENT:
+            out[nid] = OMITTED_PERCENT
+            raised.append(nid)
+    return out, tuple(sorted(raised))
 
 
 def floor_unexplored(scores: Dict[int, float], nodes: Sequence[SearchNode], unexplored_floor: float,
@@ -857,11 +981,33 @@ class SearchNodeOracle:
 
     @staticmethod
     def score(reply: Any, nodes: Sequence[SearchNode], unexplored_floor: float = 0.0) -> Optional[NodeOracleResult]:
-        """Parse, fill the omitted, apply the optional floor, normalise, clamp; read the pass verdict."""
+        """What the planner is handed for ``reply``: the model's numbers, checked for format, scale and meaning.
+
+        The model need not write exactly what RPT* takes; this makes it so,
+        from the reply and the nodes alone and with no knowledge of any
+        room or object:
+
+        1. **Format** (:func:`parse_reply`): the number under ``p`` or a
+           name a model drifts to, as a number or as text; ids nobody
+           listed dropped; a reply that scores no listed node is unusable
+           (None: the caller repairs the schema once, then backs off).
+        2. **Scale** (:func:`parse_reply`, :func:`normalise`): percentages,
+           whether written as such or as fractions of one, clamped into
+           0-100 and turned into probabilities under :data:`P_CEILING`,
+           each on its own -- never renormalised.
+        3. **Meaning**: a listed node the model did not score is forgotten,
+           not ruled out (:data:`OMITTED_PERCENT`); a room never entered is
+           never zero (:func:`keep_unentered`), while the zero of a room
+           the robot has been inside stands and keeps it out of the order;
+           the optional floor (:func:`floor_unexplored`, off by default).
+
+        The ``pass`` verdict and the three readings are read beside them.
+        """
         parsed = parse_reply(reply, nodes)
         if parsed is None:
             return None
         scores, elsewhere, reasons, omitted = parsed
+        scores, kept = keep_unentered(scores, nodes)
         scores, floored = floor_unexplored(scores, nodes, unexplored_floor)
         probs, elsewhere = normalise(scores, elsewhere)
         values = list(probs.values())
@@ -870,4 +1016,5 @@ class SearchNodeOracle:
         return NodeOracleResult(probs=probs, elsewhere=elsewhere, p_present=1.0 - elsewhere,
                                 source=SOURCE_LLM, reasons=reasons, raw_reply=reply if isinstance(reply, dict) else None,
                                 spread=float(max(values) - min(values)) if values else 0.0, omitted=omitted,
-                                reading=reading, floored=floored, pass_verdict=parse_pass(reply))
+                                reading=reading, floored=tuple(sorted(set(kept) | set(floored))),
+                                pass_verdict=parse_pass(reply))

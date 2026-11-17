@@ -11,6 +11,44 @@ Format per entry:
 
 ---
 
+## 2026-11-17 — Rewording a 3B's prompt: the probe scenarios could not rank two wordings, and a reply that skips nodes scores only the last one
+
+**Symptom:** rewriting the node oracle's prompt for `qwen2.5:3b-instruct` (`search_node_prompts.py`), a draft that
+read well gave worse replies than the text it replaced: every room of a query at 0 in a fifth of the replies, one
+node scored and the others left out in a seventh of the lines, and rooms the robot had never entered at 0 in two
+lines of five. The nineteen hand-written probe scenarios did not show it -- the draft held *more* of their claims.
+
+**Root cause:** the probe was the wrong instrument, and three sentences were each worth a tenth of the replies.
+The probe: a draft and three variants of it that each changed one statement held 6, 8, 7 and 4 of its 19 claims,
+and one text held 13 on a warm server and 9 when every call was a cold start. The sentences, each one comparison of two
+texts on the same hundred recorded queries (so: what that round showed, not laws):
+(1) *A negation becomes the reason.* With "a detector looks for the target in every frame; the search goes on, so it
+has not been found yet", 44 % of the zeros the model wrote gave that as their reason -- `"why": "bedroom not checked,
+no toilet found there yet", "p": 0`, for rooms entered and not -- against 18 % under the text before. Put as "so the
+target is in a place the robot has not seen yet" it was 18 % again, and the numbers followed the effort spent in a
+room again (rank correlation -0.22, from -0.08). The count of zeros did not fall with that sentence alone.
+(2) *A reply that leaves nodes out scores exactly one: the last one listed.* All 56 such replies, under all nine
+texts tried. A closing question in the singular ("how likely is it that the target is there?") got 11 of them in a
+hundred queries; "for each of the N nodes above ... score all N" got 5.
+(3) *"In that room" does not say which part.* Asked whether the target "is in that room", the model put a third of
+the never-entered rooms at 0; asked about "the part of that room the robot has not seen yet", a quarter, with their
+mean up from 41 % to 54 %.
+
+**Fix / workaround:** choose a wording on what its replies ARE over a hundred REAL queries, not on a dozen
+hand-written rankings: take the node lists of a recorded run (`steps.jsonl` keeps them at every oracle call), ask
+each candidate the same hundred with `LLM_EXCLUSIVE` set so a reply depends on its request alone, and tally usable
+replies, nodes left out, zeros on rooms never entered, replies with every node at 0, and the rank correlation of
+the number with the effort spent in a room (the table is in `core/mapping/topology/README.md`; the scripts and
+replies of this round are under `runs/oracle_prompt_ab_20261117/wording/`, untracked). Eight minutes a candidate on
+the GPU. And keep in CODE whatever must hold whatever the model writes: a room never entered is never handed to
+RPT* at zero (`search_node_oracle.keep_unentered`) -- a quarter of them still come back at 0 under the best wording.
+
+**Don't:** rank two wordings by the probe's count of claims held, or compare a count taken on a warm Ollama with one
+taken cold: at temperature 0 with a fixed seed the same request still gets another answer when the server has
+answered something else before. Don't read a difference of a few points between two candidates as a finding either:
+two rewordings of one sentence moved the zeros on never-entered rooms by eight points. And don't end a prompt that
+lists N things with a question in the singular.
+
 ## 2026-11-16 — "Within 1 m" is two different zones: HM3D's metre is horizontal, MP3D's is 3-D from the floor
 
 **Symptom:** the closing STOPped on a fresh, whole box of the target within a planar metre -- and on MP3D five

@@ -1330,9 +1330,13 @@ refresh.
    in place of `entered_discount` (0.5): as good as scanned, whatever the
    model writes. These discounts, and the boost and floor of a never-entered
    room (`unvisited_boost` 1.5, `unvisited_floor` 0.15), are the CODE's
-   rules: since 2026-11-16 the prompt states none of them -- it states no
-   rule of judgement at all -- so they are the one hand-set adjustment left
-   between the model's probability and RPT*. The
+   rules: the hand-set adjustment between the model's probability and
+   RPT*. Since 2026-11-17 the prompt tells the model, in words and without
+   a number, what they act on -- that floor mapped and actions spent in a
+   room without the target count against it, and that a room never entered
+   has not been searched -- so a searched room can now be lowered twice,
+   by the model and by these discounts; neither was changed for it (the
+   measurement: `core/mapping/topology/README.md`). The
    arithmetic floor below (`unexplored_floor`)
    is **off by default** -- it was the 3B era's default; it stays a knob. (Two
    more floors and the hard type exclusion are gone: `home_floor` and
@@ -1371,8 +1375,11 @@ refresh.
    it writes. **Two more factors since 2026-10-21** (the user's
    recalibration for the unvisited): a room the agent has NEVER stood in,
    not finished from outside, is raised by `unvisited_boost` (1.5x) and
-   read at no less than `unvisited_floor` (0.15) when the model gave it
-   anything -- the models read `frontier=0` or `1` on a never-entered room
+   read at no less than `unvisited_floor` (0.15) -- since 2026-11-17 also
+   when the model put it at 0: the oracle never hands a never-entered room
+   on at zero (`search_node_oracle.keep_unentered` reads it at 1 %, as a
+   node the model left out), so the floor's `prob > 0` is always met; an
+   ENTERED room's zero stands and keeps it out of the order -- the models read `frontier=0` or `1` on a never-entered room
    as little to find, when the count measures the map and not the room,
    and one boundary cleared opens the whole of it (the prompt now says
    "never lower a never-entered room for a low frontier count"); and the
@@ -1500,46 +1507,53 @@ refresh.
 3. **Probability per node** -- the same call, to
    `core/mapping/topology/search_node_oracle.py`. The model is shown every
    ROOM of the floor **that is still a node** (not finished), one line
-   each, with everything the scene graph stores about the room except where
-   it is: type or `unknown` (`kitchen?` when the evidence is thin), size
-   and how much of its floor the camera has covered (the room extents:
-   `all sides mapped`, or `at least` while a side is unmapped), frontier
-   clusters left, its **exits** (`exits=2 (1 doorway, ~30m2 unseen behind
-   them)` and the objects glimpsed through them -- the room's attributes
-   since 2026-10-21, see *Exits are the room's attributes* below), its
-   status, the actions spent in it, the types of the rooms a door joins it
-   to, the objects seen in it with their counts, and -- when one of the
-   target's own kind is among them and the search still goes on --
-   `target: detected here, not reached` (under the deprecated
-   `openings.exits_as_nodes` every **OPENING** not folded into an offered
-   room is a node of its own as well). A node is the room **together with
-   the unseen space its exits open onto**, and the model answers, for each
-   node, the probability in percent that **the target is in the part of it
-   not checked yet** -- the room's floor that is left, and that unseen
-   space: the detector has looked at the covered floor in every frame and
-   not found the target there, so this is the probability that searching
-   the node finds it, which is what RPT* is handed.
+   each, with four things and nothing else (since 2026-11-17): its type, or
+   `unknown` with the objects seen in it (`kitchen?` when the type is
+   tentative; a classified room does not list its objects); the floor
+   mapped out of its floor, `mapped=6 of 12 m2 (50%)` -- the observed part
+   of the room's FREE floor, so furniture and pockets the robot cannot
+   stand on are not counted; the frontier clusters left; and the actions
+   spent in it, `searched=never` for a room not entered. (Until that day
+   the line held everything the scene graph stores about the room except
+   where it is -- size and sides, exits and what was glimpsed through
+   them, a status, the rooms a door joins it to, its objects, a note when
+   the target's kind was detected in it; all of it is still on the node,
+   for the recording. Under the deprecated `openings.exits_as_nodes` every
+   **OPENING** not folded into an offered room is a node of its own as
+   well.) The model answers, for each room, the probability in percent
+   that **the target is in the part of that room the robot has not seen
+   yet**; the reply is then checked for
+   format, scale and meaning (`SearchNodeOracle.score`: a number as text
+   or with a percent sign, a reply written in fractions of one, a node
+   left out at 1 %, a room never entered never at 0) and weighed by
+   exploration state (step 4's factors) before RPT* is handed it.
    These are independent estimates, **not mutually exclusive
    location shares**. Each is
    converted to a fraction and clamped below 1, without cross-node normalisation.
    RPT* uses multiplicative survival; the legacy `elsewhere` diagnostic now means
    the product of failure probabilities, and `p_present` its complement. This is
    an explicit independence approximation, not proof that real rooms are independent.
-   **Since 2026-11-16 the judgement is the model's own and the prompt gives
-   it none of ours.** The system prompt (about 3,500 characters, 14,751
-   before) tells the model to use its own reasoning and its own knowledge
-   of standard homes and buildings -- how they are laid out, in which rooms
-   furniture and objects of each kind are found -- and to derive every
-   probability from that; it names no room for any object, gives no number
-   or band, lists no goal categories, states no rule (what a covered room
-   is worth, when an exit raises a room, how the budget weighs) and shows
-   no worked example. What it states are FACTS: what a node is, what each
-   field of a line measures and how it was obtained, what the reply looks
-   like. The name of the object the episode searches for is on the
-   `TARGET:` line of every call (and in the question that ends the user
-   prompt). **Distance is not in the prompt at all**: no distance, no
-   position, and no `here=yes` on the room the robot stands in (dropped on
-   2026-11-16); the model is told that travel is the planner's.
+   **Since 2026-11-16 the knowledge of where things are is the model's own
+   and the prompt gives it none of ours.** The system prompt (about 3,000
+   characters, 14,751 before) opens "You reason like a person who knows how
+   homes are laid out", tells the model to use its own reasoning and its own
+   knowledge of standard homes and buildings -- in which rooms furniture
+   and objects of each kind are found -- and to derive every probability
+   from that; it names no room for any object, gives no number or band,
+   lists no goal categories and shows no worked example. What it states is
+   what the data means: what each field of a line is, and -- since
+   2026-11-17, in words and without a number -- what the search so far
+   means for a room (the more of it is mapped and the more actions were
+   spent searching it, the less of it is left to hold the target -- its
+   unmapped floor and what lies behind its frontiers; a room never entered
+   has not been searched, and grows likelier as the others are searched; a
+   room's number is about the target being in it, not about walking
+   through it). The name of the object the
+   episode searches for is on the `TARGET:` line of every call (and in the
+   question that ends the user prompt). **Distance is not in the prompt at
+   all**: no distance, no position, no neighbours, and no `here=yes` on the
+   room the robot stands in (dropped on 2026-11-16); the model is told that
+   travel is the planner's.
    **The wording is a named version, tuned per model**
    (`core/mapping/topology/search_node_prompts.py`): what a large model
    takes from one sentence a small one needs said field by field, so a
@@ -1627,15 +1641,14 @@ refresh.
    a toilet -- in place of the room-level prior. So under `explore` an exit
    is never a node: **every** exit read off the live map is folded into the
    room it opens from (`_fold_openings`, `opening_folded` events; the HUD
-   still lists it, flagged `~`), the room's node line carries its exits as
-   attributes (`exits=2 (1 doorway)  glimpsed through its exits: toilet`,
-   `room_exits` -> `SearchNode.exits` / `doorways` / `glimpsed`; the HOUSE
-   line counts every exit of the storey), and the prompt's EXITS rule ties
-   them to the room's type: exits raise a room only where its type fits the
-   target's home (a bathroom's unlooked door for a toilet, a bedroom's
-   possible en-suite), a hallway's or an unidentified room's exits are
-   valued by what the home still lacks behind them, and a living room's
-   gaps do not raise it for a toilet however many there are. The **global
+   still lists it, flagged `~`), and the room's node carries its exits as
+   attributes (`room_exits` -> `SearchNode.exits` / `doorways` / `glimpsed`;
+   the HOUSE line counts every exit of the storey). Until 2026-11-17 the
+   room's prompt line showed them (`exits=2 (1 doorway)  glimpsed through
+   its exits: toilet`) and, until 2026-11-16, a prompt rule tied them to the
+   room's type; the line now holds the room's type, mapped floor, frontier
+   count and effort alone, and the frontier count is what tells the model
+   that the room leads on. The **global
    decision is over rooms** (and stairs); the **look through a doorway is a
    step of the chosen room's local exploration** -- the explore visit's
    frontier walk, which ends when the room's GAPs are exhausted or

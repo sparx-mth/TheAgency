@@ -283,6 +283,13 @@ def test_a_room_never_stood_in_is_raised_and_floored_and_an_entered_one_decays_w
     assert scale(0.9) == pytest.approx(1.0), "a probability, capped"
     assert scale(0.0) == 0.0, "a room the model (or the type prior) gave nothing stays nothing"
     assert policy.loop._value_factors == {}, "a zero is not a factor"
+    # ... which the oracle never hands on for such a room (2026-11-17): the model's 0 on a room never entered
+    # is read as not given, so the floor holds and the room is a node for RPT*; an entered room's 0 stands.
+    from sparx_agency.core.mapping.topology.search_node_oracle import ROOM, SearchNode, SearchNodeOracle
+    zeros = {"nodes": [{"id": 1, "p": 0}]}
+    handed = SearchNodeOracle.score(zeros, [SearchNode(1, ROOM, "unknown", area_m2=9.0)]).probs[1]
+    assert 0.0 < handed < settings.min_prob <= scale(handed) == pytest.approx(settings.unvisited_floor)
+    assert SearchNodeOracle.score(zeros, [SearchNode(1, ROOM, "unknown", area_m2=9.0, last_inside_ago_s=4.0)]).probs[1] == 0.0
     assert scale(0.4, here=1) == pytest.approx(0.4), "the room the agent stands in keeps its number"
     policy.loop._finished[1] = ("peek", 3)
     assert scale(0.4) == pytest.approx(0.4), "a room finished from outside is not raised"

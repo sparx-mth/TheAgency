@@ -16,7 +16,7 @@ from sparx_agency.core.mapping.topology.search_node_oracle import budget_line
 from sparx_agency.core.planning.object_search.rooms.room_scans import (
     EXPLORED, FRAGMENT, SCAN_POINT_INSIDE, SEEN_FROM_SCAN, SEEN_THROUGH)
 
-#: The scan ledger's verdicts in the prompt's words (``status=scanned(<how>, <ago>)``).
+#: The scan ledger's verdicts in words (``SearchNode.scanned``: for the record; on a room's prompt line until 2026-11-17).
 SCAN_WORDS = {SCAN_POINT_INSIDE: "full rotation", SEEN_FROM_SCAN: "seen from another room's scan",
               SEEN_THROUGH: "looked into, no frontier left", FRAGMENT: "fragment",
               EXPLORED: "walked, every part of it seen, no frontier left"}

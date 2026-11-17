@@ -46,10 +46,12 @@ geometry), for every room of the current partition:
   in 40 HM3D recordings, 73 were over a quarter bigger by the end of the
   episode; of the 233 growths behind that, 178 were merges and 51 moved
   cuts -- mapped floor changing hands -- and 3 a side read as seen that was
-  not (``CHANGELOG.md`` 2026-11-16). The oracle's line therefore words it
-  ``all sides mapped`` and its prompt says the division into rooms may
-  still be revised (``search_node_oracle.format_size``); the identifier is
-  kept because recordings and the replay tool carry it;
+  not (``CHANGELOG.md`` 2026-11-16). The oracle's line therefore worded it
+  ``all sides mapped`` (``search_node_oracle.format_size``) for as long as
+  it showed a size; since 2026-11-17 the line shows the observed part of
+  the free floor and the frontier count instead, and this reading is for
+  the record. The identifier is kept because recordings and the replay
+  tool carry it;
 * **how much of it has been covered**: the floor the camera has seen from
   within detection range with a clear line of sight, as recorded per cell by
   the sight ledger (``observed``) -- not the cells the agent walked over --

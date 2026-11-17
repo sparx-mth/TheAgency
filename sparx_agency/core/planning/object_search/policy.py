@@ -118,8 +118,9 @@ class RPTSearchPolicy:
         self.glance_settings = GlanceSettings(geometric_enabled=s.geometric_glances)
         self.sight_settings = SightSettings()
         # The room extents (2026-11-16): where each room's walls are, its size as final or a lower bound, and
-        # how much of it the camera has covered from detection range -- the oracle's size= and covered=. Read
-        # off the agent's own occupancy map and its partition alone (core/mapping/topology/room_extent.py).
+        # how much of it the camera has covered from detection range -- the oracle's mapped= (the observed part
+        # of the room's free floor, since 2026-11-17). Read off the agent's own occupancy map and its partition
+        # alone (core/mapping/topology/room_extent.py).
         self.extent_params = ExtentParams()
 
     def standing_retry_clearance_m(self):
@@ -166,7 +167,9 @@ class RPTSearchPolicy:
                                           "re-cut rooms), else the size is a lower bound shown "
                                           "as 'at least'; coverage is the room's share of the observed cells; recomputed "
                                           "from the live map and partition on every update, keyed by cell, never by room "
-                                          "id; shown to the node oracle as size= and covered=; nothing but that map, its "
+                                          "id; shown to the node oracle as mapped= -- the observed part of the room's free "
+                                          "floor out of that floor, in m2 and as a share: floor the robot cannot stand on "
+                                          "(furniture, settled pockets) is not counted (2026-11-17); nothing but that map, its "
                                           "partition, the sight record and the pose enters the reading -- no simulator "
                                           "geometry, no room annotations, no size priors "
                                           "(core/mapping/topology/room_extent.py)"),
@@ -195,9 +198,9 @@ class RPTSearchPolicy:
                                   "the nearest room floor; room numbers are unique across the building"
                                   % DEFAULT_SEGMENTATION.door_snap_reach_m,
                 "openings": (("every exit of the storey (a doorway or gap at the edge of the mapped floor) is an attribute "
-                              "of the room it opens from -- exits=N (k doorways) and the objects glimpsed through them on "
-                              "the room's node line -- never a node with a number of its own; what an exit is worth to "
-                              "its room is the model's to judge, the room's own frontier walk looks "
+                              "of the room it opens from, never a node with a number of its own (kept on the room's node "
+                              "for the record; not on its prompt line since 2026-11-17, where the frontier count stands "
+                              "for what is left); the room's own frontier walk looks "
                               "through them, and a finished room with GAPs left to walk is offered again for them "
                               "(room-level GAPs, 2026-10-21)"
                               if self.loop_settings.room_level_gaps else
@@ -220,22 +223,34 @@ class RPTSearchPolicy:
                 "node_oracle": {"nodes": "every room of the floor in force (finished ones shown with "
                                          "their status)" + (
                                     "" if not self.loop_settings.openings.enabled else
-                                    "; each room's exits are attributes on its line, not nodes"
+                                    "; each room's exits are the room's attributes, not nodes"
                                     if self.loop_settings.room_level_gaps else " + its openings"),
-                                "asks": "independent P(target is in the part of the node not checked yet) per node -- a "
-                                        "room together with the unseen space its exits open onto -- from the model's own "
+                                "asks": "independent P(target is in the part of the room not seen yet) per node, "
+                                        "from the model's own "
                                         "knowledge of standard homes and buildings; the system prompt (the version named "
-                                        "under 'prompt') states the task, facts about each field and the reply format "
-                                        "and nothing else -- no room named for any object, no number or band, no list of "
-                                        "goal categories, no rule of judgement, no worked example (2026-11-16; "
+                                        "under 'prompt') states the task, what each field means, what the search so far "
+                                        "means for a room (the more of it is mapped and searched, the less of it is left "
+                                        "to hold the target; a room never entered has not been searched) and the reply "
+                                        "format "
+                                        "-- no room named for any object, no number or band, no list of "
+                                        "goal categories, no worked example (2026-11-16; "
                                         "room_priors.py removed 2026-11-15); the user prompt gives the name of the "
                                         "episode's target, the HOUSE line (room types found, rooms unidentified, exits "
                                         "unlooked, the frontier state, actions used of the budget) and one line per room "
-                                        "with everything the scene graph stores about it but its position: type, size, "
-                                        "coverage, frontier, exits, status, actions spent, the rooms it is joined to, "
-                                        "objects with counts, whether the target's kind was detected there; no distance "
-                                        "and no word on where the robot stands -- travel is RPT*'s; the reply keeps "
-                                        "home/house/stage and a first|second pass verdict before the numbers",
+                                        "with four things (2026-11-17): its type (the objects seen only while it is "
+                                        "unclassified), the floor mapped out of its free floor (m2 and share), the "
+                                        "frontiers left, the actions spent inside ('never' for a room not entered); no "
+                                        "distance, no neighbours and no word on where the robot stands -- travel is "
+                                        "RPT*'s; the reply keeps home/house/stage and a first|second pass verdict before "
+                                        "the numbers",
+                                # What the code does to the reply before RPT* sees it (search_node_oracle.score), and
+                                # then by exploration state (RoomSearchLoop._scaled_values, the settings above).
+                                "postprocessing": "format: p or a drifted key, a number as text, a percent sign; ids nobody "
+                                                  "listed dropped; scale: percentages, also when written as fractions of "
+                                                  "one, clamped to 0-100, never renormalised; meaning: an omitted node "
+                                                  "1%, a room never entered never 0 (read as 1%, then the loop's floor "
+                                                  "for unvisited rooms), an entered room's 0 stands and keeps it out of "
+                                                  "the order (min_prob); no knowledge of any room or object",
                                 # Which wording the model is asked under: the version's name, the model it was
                                 # tuned on and the digest of its text (``search_node_prompts.py``). The model that
                                 # answers is the LLM client's reasoning route, recorded by whoever builds the client
