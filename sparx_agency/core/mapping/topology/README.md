@@ -440,9 +440,9 @@ decides whether to keep a stale label — nothing is cached on failure.
   `qwen2.5:3b-instruct` on both routes on the GPU, each arm from a frozen
   copy of its tree, every LLM call a cold start (`LLM_EXCLUSIVE`) so that
   the arms differ by the change alone -- the four pilot episodes of each
-  arm came out identical when the arm was run again. The MP3D half (90
-  episodes of the single-storey set) was still running when this was
-  written.
+  arm came out identical when the arm was run again. The MP3D half is the
+  same design on 90 episodes of the single-storey MP3D val set (8 scenes);
+  its table follows the HM3D one.
 
   | HM3D, 90 pairs | 2026-11-16 | 2026-11-17 | difference (95 % interval) |
   |---|---|---|---|
@@ -454,15 +454,38 @@ decides whether to keep a stale label — nothing is cached on failure.
   | returns to a room already searched (20+ actions inside), an episode | 2.81 | 2.80 | -0.01 (-0.63, +0.64) |
   | never-entered rooms offered to RPT\* | 66 % | 99 % | |
 
-  - **SR and SPL did not move significantly**; 34 of the 90 episodes ran
-    identically in both arms. A call takes as long as before: the prompt
+  | MP3D, 90 pairs | 2026-11-16 | 2026-11-17 | difference (95 % interval) |
+  |---|---|---|---|
+  | SR | 78.9 % (71) | 80.0 % (72) | +1.1 points (-3.3, +5.6); 3 gained, 2 lost |
+  | SPL | 0.299 | 0.312 | +0.013 (-0.014, +0.042) |
+  | an oracle call, without the model load | 3.13 s (median 2.84) | 3.17 s (median 3.01) | prompt 1,382 -> 983 tokens, reply 136 -> 144 |
+  | oracle repair calls an episode | 0.43 | 0.01 | -0.42 (-0.60, -0.26) |
+  | room choices that are a room never entered | 73 % (214 of 294) | 81 % (250 of 310) | +0.40 an episode (+0.06, +0.79) |
+  | room choices that are a room entered before, an episode | 0.89 | 0.67 | -0.22 (-0.42, -0.04) |
+  | returns to a room already searched (20+ actions inside), an episode | 1.90 | 1.81 | -0.09 (-0.58, +0.40) |
+  | never-entered rooms offered to RPT\* | 73 % | 100 % | |
+
+  - **SR and SPL did not move significantly on either set** (McNemar
+    p = 1.0 on both); 34 of the 90 HM3D and 45 of the 90 MP3D episodes ran
+    identically in both arms. Over all 180 pairs SR went from 82.8 % to
+    83.9 % and SPL from 0.365 to 0.386. A call takes as long as before: the prompt
     is a quarter shorter, and writing the reply is what costs.
   - **What changed is which rooms RPT\* is offered, and the code did
     most of it.** The 3B put a never-entered room at 0 in 36 % of its lines
-    under BOTH texts (327 of 906; 273 of 748). The old code then left such
-    a room out of the order; `keep_unentered` keeps it (273 raised), so
-    the agent chooses never-entered rooms more often. It does not walk
-    back into searched rooms any less.
+    under BOTH texts on HM3D (327 of 906; 273 of 748) and in 28 % and 27 %
+    on MP3D (229 of 824; 201 of 738). The old code then left such a room
+    out of the order; `keep_unentered` keeps it (273 raised on HM3D, 202 on
+    MP3D), so the agent chooses never-entered rooms more often. On MP3D it
+    also chose a room it had entered before less often; on neither set
+    does it walk back into searched rooms significantly less.
+  - **Faster episodes, not explained.** An episode took about 25 % less
+    wall time on both sets (HM3D 252 -> 189 s, MP3D 191 -> 144 s, both
+    p < 0.001). The room labeller, whose prompt did not change, was called
+    40-45 % less often (HM3D 17.0 -> 10.3, MP3D 16.4 -> 9.1 calls an
+    episode); at about 3.1 s a cold call that is some 21 s of the saving,
+    the fewer oracle calls and repairs a few more, and the rest is not
+    accounted for. Under `LLM_EXCLUSIVE` every call pays a cold load that a
+    warm server does not, so none of this carries over to a normal run.
   - **The check measures the three changes together.** Two arms cannot
     say how much is the wording and how much the rule.
 
@@ -486,7 +509,25 @@ decides whether to keep a stale label — nothing is cached on failure.
   hidden the target's room against the model -- at their last query 5
   did not have the target's room on the map yet, in 3 it was a
   never-entered room the agent did not reach in time, and in 3 the scan
-  ledger had finished it. Neither discount was changed.
+  ledger had finished it.
+
+  MP3D, the same analysis on the arm of 2026-11-17: the model's number
+  for a room entered and left fell from 39 % (under ten actions inside) to
+  24 % (forty or more), the loop's factor from 0.43 to 0.06. Of the 7
+  lines with three or more frontiers, twenty or more actions inside and
+  50 % or more from the model, RPT\* received 0.14 on average and 2 were
+  put under the threshold, neither the target's room. Of the 79
+  entered-and-left lines the model put at 50 % or more, 6 were the
+  target's room (8 %, where 4 % of all entered-and-left lines are); the
+  loop put 4 of the 79 under the threshold, none the target's room. Of the
+  18 failed episodes, at the last query 11 did not have the target's room
+  on the map yet, in 4 it was a never-entered room the agent did not reach
+  in time (offered in all 4, the top node in 1), 2 had no oracle call and
+  in 1 the scan ledger had finished it; the loop hid the target's room
+  against the model in none (in the 2026-11-16 arm, in 1 of 19). The two
+  sets agree: the loop's discount decides for a searched room, and it has
+  not yet cost an episode under the new prompt. Neither discount was
+  changed.
 - `room_priors.py` — **deleted on 2026-11-15.** It held hand-written tables
   that told the search where things are: the room types a target category
   is likely and rare in (`TARGET_HOMES`, the `WHERE IT LIVES` prompt line),

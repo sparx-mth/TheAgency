@@ -740,8 +740,11 @@ same evidence can be counted twice, once by the model and once by
 model's share was small: its own number for a room that had been entered and
 left fell from $48\%$ on average after fewer than ten actions inside to $36\%$
 after forty or more, while the factor of \cref{eq:dwell} fell from $0.44$ to
-$0.08$ over the same range. Neither has been changed. \TODO{Decide whether to
-keep both once the MP3D half of that check is available.}
+$0.08$ over the same range on HM3D, and from $39\%$ to $24\%$ against $0.43$
+to $0.06$ on MP3D. Neither has been changed. \TODO{Decide whether to keep both;
+on both halves of that check the factor, not the model, decided for a searched
+room, and it did not hide the target's room in any episode under the current
+prompt.}
 
 \paragraph{When the model is queried.} The oracle is queried at every loop
 point, i.e.\ whenever a node has been searched and released, and once at the
@@ -1528,6 +1531,25 @@ rooms at zero, and before the change such a room was not offered to the
 planner ($66\%$ of the never-entered rooms were offered, against $99\%$
 after).
 
+The same design on $90$ single-storey MP3D validation episodes ($8$ scenes)
+gave the same picture. The success rate was $78.9\%$ before and $80.0\%$
+after ($+1.1$ points, $[-3.3, +5.6]$; three episodes gained, two lost) and the
+SPL $0.299$ and $0.312$ ($+0.013$, $[-0.014, +0.042]$); $45$ of the $90$
+episodes ran identically, and neither difference is significant. Over both
+sets, $180$ pairs, the success rate went from $82.8\%$ to $83.9\%$ and the SPL
+from $0.365$ to $0.386$. A probability query took $3.1$ and $3.2$\,s on
+average without the model load (prompt $1{,}382$ against $983$ tokens), and
+replies that needed the retry fell from $0.43$ to $0.01$ per episode. The
+agent chose a never-entered room in $81\%$ of its room choices against $73\%$
+(interval of the per-episode difference $[+0.06, +0.79]$) and a room it had
+entered before less often ($0.67$ against $0.89$ per episode, $[-0.42,
+-0.04]$); returns to a room in which it had spent $20$ actions did not change
+significantly ($1.8$ against $1.9$). The model put $27\%$ of the never-entered
+rooms at zero, against $28\%$ before; all of them were offered to the planner
+after the change, against $73\%$ before. An episode took about a quarter less
+wall time on both sets; part of it is fewer calls to the room labeller, whose
+prompt did not change, and the rest is not accounted for.
+
 The same check shows what the adjustment by exploration state does to rooms
 that were entered and left. We laid the dataset's goal positions over the
 recorded room partitions; this analysis uses privileged data and is not part
@@ -1537,8 +1559,11 @@ that had been entered and left: the small model does not identify which
 searched room deserves a second look. The adjustment put $7$ of the $132$
 below the offer threshold, none of them the target's room, and in none of the
 $11$ failed episodes had it hidden the target's room against the model's
-number. \TODO{Add the MP3D half of this check ($90$ single-storey episodes),
-which was running at the time of writing. The check measures the three changes
+number. On MP3D, of the $79$ such rooms given $50\%$ or more, $6$ ($8\%$, against
+$4\%$ of all rooms entered and left) held the target; the adjustment put $4$
+of them below the threshold, none the target's room, and hid the target's room
+in none of the $18$ failed episodes, $11$ of which had not yet mapped any part
+of that room at their last query. \TODO{The check measures the three changes
 together: separate their effects, and repeat it with learned perception and
 with the 14B model.}
 
@@ -1973,9 +1998,10 @@ target is to the language model (\cref{sec:oracle}), but the method in this
 form has not been run on a full benchmark: the reported numbers were obtained
 with a prescriptive prompt. The only evidence so far comes from a 3B model
 (\cref{sec:experiments-revisions}): probes of its replies, and a paired check
-on $90$ HM3D episodes in which the current prompt, room line and reply checks
-did not differ significantly from the revision before them. In that check the
-model put a third of the never-entered rooms at zero and did not identify
+on $90$ HM3D and $90$ MP3D episodes in which the current prompt, room line and
+reply checks did not differ significantly from the revision before them. In
+that check the model put between a quarter and a third of the never-entered
+rooms at zero and did not identify
 which of the rooms already searched held the target, so the order of the
 search still rests to a large part on the code: the minimum for a
 never-entered room, the rescaling by exploration state and the fixed
