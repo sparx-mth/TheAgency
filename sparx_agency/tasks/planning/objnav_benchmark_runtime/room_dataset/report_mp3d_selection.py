@@ -18,8 +18,9 @@ def answers_by_method(out):
     by_frame = {json.loads(line)["frame"]: json.loads(line)["answer"] for line in (out / VLM_FILE).read_text().splitlines()}
     methods = {}
     for _, room, entry in selections(out):
-        for method, frames in entry["methods"].items():
-            methods.setdefault(method, {})[room] = [by_frame[f] for f in frames if f in by_frame]
+        if all(f in by_frame for f in entry["frames"]):
+            for method, frames in entry["methods"].items():
+                methods.setdefault(method, {})[room] = [by_frame[f] for f in frames]
     return methods
 
 
@@ -28,7 +29,7 @@ def report(rooms, out):
     methods = answers_by_method(out)
     scored = set.intersection(*(set(a) for a in methods.values()))
     methods[BASELINE] = {r: a for r, a in load_answers(rooms / VLM_FILE).items() if r in scored}
-    correct = {m: {k: first_k_accuracy({r: a for r, a in methods[m].items() if r in scored and a}, truth, k) for k in KS} for m in methods}
+    correct = {m: {k: first_k_accuracy({r: a for r, a in methods[m].items() if r in scored}, truth, k) for k in KS} for m in methods}
     rng = np.random.default_rng(0)
     lines = ["# Which views to show the vision model: first K views per method, %d Matterport3D regions, 4B with the room list\n" % len(scored),
              "| method | " + " | ".join("K=%d" % k for k in KS) + " |", "|---|" + "---|" * len(KS)]

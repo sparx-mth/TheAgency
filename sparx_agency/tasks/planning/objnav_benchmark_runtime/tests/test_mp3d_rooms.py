@@ -106,3 +106,13 @@ def test_annotated_object_lists_leave_out_placeholder_names(tmp_path):
     (tmp_path / "scene").mkdir()
     (tmp_path / "scene" / "regions.json").write_text(json.dumps({"rooms": [{"room": "scene_r0", "objects": ["bed", "delete", "lamp"]}]}))
     assert object_lists(tmp_path, "annotated", "inside") == {"scene_r0": ["bed", "lamp"]}
+
+
+def test_a_region_counts_only_once_every_frame_any_method_kept_has_an_answer(tmp_path):
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.report_mp3d_selection import VLM_FILE, answers_by_method
+    (tmp_path / "scene").mkdir()
+    selection = {"done": {"frames": {"a": {}, "b": {}}, "methods": {"floor": ["a", "b"], "random": ["a"]}},
+                 "half": {"frames": {"c": {}, "d": {}}, "methods": {"floor": ["c"], "random": ["d"]}}}
+    (tmp_path / "scene" / "selection.json").write_text(json.dumps(selection))
+    (tmp_path / VLM_FILE).write_text("".join(json.dumps({"room": r, "frame": f, "answer": "kitchen"}) + "\n" for r, f in (("done", "a"), ("done", "b"), ("half", "c"))))
+    assert answers_by_method(tmp_path) == {"floor": {"done": ["kitchen", "kitchen"]}, "random": {"done": ["kitchen"]}}
