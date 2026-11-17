@@ -1,4 +1,4 @@
-"""For the labelled Matterport3D regions already built, render a pool of candidate views and keep 6 by four methods: random, random after the close-up filter, room floor seen, room floor and objects seen."""
+"""For the labelled Matterport3D regions already built, render a pool of candidate views and keep 6 by four methods: random, random after the close-up filter, room floor seen, room floor and objects seen. With ``--walls``, only the room perimeter the depth rays end on."""
 import argparse
 import json
 import traceback
@@ -13,14 +13,15 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.sample_
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import protocol_for
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.build_mp3d_frames import FLOOR_SAMPLES, OBJECT_GAP_M, interior_cells
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import assign_cells, compass_yaws, spread_points
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import assign_cells, box_perimeter, compass_yaws, spread_points
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_house import read_house, to_habitat
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.view_selection import describe_candidates, random_pick, select
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.view_selection import describe_candidates, random_pick, select, select_walls
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
 
 METHODS = ("random", "random_filtered", "floor", "floor_objects")
 FRAMES = 6
 MIN_ROOM_CELLS = 10
+PERIMETER_SPACING_M = 0.25
 
 
 def picks_of(candidates, rng):
@@ -50,15 +51,16 @@ def select_scene(scene, rooms, args, protocol, detector):
     folder = args.out / scene
     (folder / "frames").mkdir(parents=True, exist_ok=True)
     result = {}
-    for room in rooms:
+    for room in rooms[::args.every]:
         owner = lambda points, r=room["region"]: assign_cells(points, objects, OBJECT_GAP_M) == r
         room_cells = interior_cells(cells, tuple(room["box_xz"]), room["floor_y"], owner, margin=0.0)
         if len(room_cells) < MIN_ROOM_CELLS:
             result[room["room"]] = {"skipped": "room cells %d" % len(room_cells)}
             continue
         poses = [(room_cells[i], yaw) for i in spread_points(room_cells[:, [0, 2]], args.candidates) for yaw in compass_yaws(args.headings)]
-        candidates = describe_candidates(poses, render, room_cells, protocol, detector)
-        picks = picks_of(candidates, np.random.default_rng([args.seed, zlib.crc32(room["room"].encode())]))
+        perimeter = box_perimeter(tuple(room["box_xz"]), PERIMETER_SPACING_M) if args.walls else None
+        candidates = describe_candidates(poses, render, room_cells, protocol, detector, perimeter)
+        picks = {"walls": select_walls(candidates, FRAMES)} if args.walls else picks_of(candidates, np.random.default_rng([args.seed, zlib.crc32(room["room"].encode())]))
         frames = {}
         for index in sorted({i for chosen in picks.values() for i in chosen}):
             c = candidates[index]
@@ -79,15 +81,17 @@ def main(argv=None):
     p.add_argument("--rooms", type=Path, required=True, help="the built Matterport3D regions (regions.json per scene)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--scenes-dir", type=Path, default=Path.home() / "datasets/mp3d/scene_datasets/mp3d")
-    p.add_argument("--detector-url", required=True)
+    p.add_argument("--detector-url", help="required unless --walls")
     p.add_argument("--backend", default="yolo_world")
     p.add_argument("--candidates", type=int, default=24)
     p.add_argument("--headings", type=int, default=8)
     p.add_argument("--seed", type=int, default=17)
     p.add_argument("--scenes", nargs="*", help="only these scenes")
+    p.add_argument("--walls", action="store_true", help="select by room perimeter hit, without a detector")
+    p.add_argument("--every", type=int, default=1, help="use every Nth region of each scene")
     args = p.parse_args(argv)
     protocol = protocol_for("v1").with_split("train")
-    detector = HttpDetector(args.detector_url, [w for w in DEFAULT_VOCABULARY.read_text().strip().split(",") if w], timeout_s=120.0, expected_backend=args.backend)
+    detector = None if args.walls else HttpDetector(args.detector_url, [w for w in DEFAULT_VOCABULARY.read_text().strip().split(",") if w], timeout_s=120.0, expected_backend=args.backend)
     for folder in sorted(d for d in args.rooms.iterdir() if (d / "regions.json").exists() and (not args.scenes or d.name in args.scenes)):
         if (args.out / folder.name / "selection.json").exists():
             continue

@@ -137,3 +137,33 @@ def test_one_object_seen_from_two_views_is_one_object_and_a_second_class_at_the_
 def test_a_point_is_near_the_room_when_a_room_cell_is_within_the_gap():
     cells = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
     assert near_room((1.3, 0.0), cells, max_gap_m=0.5) and not near_room((3.0, 0.0), cells, max_gap_m=0.5)
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import box_perimeter, wall_hits
+
+
+def test_the_perimeter_runs_along_all_four_edges_at_the_spacing():
+    points = box_perimeter((0.0, 0.0, 2.0, 1.0), spacing_m=0.5)
+    assert len(points) == 12 and (0.0, 0.0) in [tuple(p) for p in points] and (2.0, 1.0) in [tuple(p) for p in points]
+    assert all(p[0] in (0.0, 2.0) or p[1] in (0.0, 1.0) for p in points)
+
+
+def hits(depth_m, perimeter, camera=(0.0, 0.0, 0.0)):
+    return list(wall_hits(np.full((48, 64), depth_m), camera, np.array(perimeter), width=64, hfov_deg=90.0, tolerance_m=0.4))
+
+
+def test_perimeter_points_where_the_depth_rays_end_are_hit():
+    assert hits(3.0, [(0.0, -3.0), (1.0, -3.0)]) == [True, True]
+
+
+def test_points_short_of_beyond_behind_or_beside_the_surface_are_not_hit():
+    assert hits(3.0, [(0.0, -1.0), (0.0, -5.0), (0.0, 3.0), (10.0, -3.0)]) == [False, False, False, False]
+
+
+def test_a_pixel_without_depth_hits_nothing():
+    assert hits(0.0, [(0.0, -3.0)]) == [False]
+    assert hits(np.nan, [(0.0, -3.0)]) == [False]
+
+
+def test_the_view_turns_with_the_yaw_when_hitting_the_perimeter():
+    assert hits(3.0, [(-3.0, 0.0)], camera=(0.0, 0.0, np.pi / 2)) == [True]

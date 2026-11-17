@@ -111,3 +111,33 @@ def near_share(depth_m, near_m):
     """The share of pixels closer than ``near_m`` or without depth (nearer than the sensor sees): high for a wall or door in the camera's face."""
     depth = np.asarray(depth_m, dtype=float)
     return float((~np.isfinite(depth) | (depth <= 0) | (depth < near_m)).mean())
+
+
+def box_perimeter(box_xz, spacing_m):
+    """Points ``spacing_m`` apart along the four edges of the box (x low, z low, x high, z high), corners included."""
+    x0, z0, x1, z1 = box_xz
+    corners = [(x0, z0), (x1, z0), (x1, z1), (x0, z1)]
+    points = []
+    for (ax, az), (bx, bz) in zip(corners, corners[1:] + corners[:1]):
+        steps = max(1, int(math.ceil(math.hypot(bx - ax, bz - az) / spacing_m)))
+        points += [(ax + (bx - ax) * k / steps, az + (bz - az) * k / steps) for k in range(steps)]
+    return np.array(points)
+
+
+def wall_hits(depth_m, camera_xz_yaw, perimeter_xz, width, hfov_deg, tolerance_m, stride=4):
+    """Which perimeter points the camera's depth rays end on: a ray at the horizon row lands within ``tolerance_m`` of the point."""
+    depth = np.asarray(depth_m, dtype=float)
+    columns = np.arange(0, width, stride)
+    metres = depth[depth.shape[0] // 2, columns]
+    valid = np.isfinite(metres) & (metres > 0)
+    if not valid.any():
+        return np.zeros(len(perimeter_xz), dtype=bool)
+    metres, columns = metres[valid], columns[valid]
+    cam_x, cam_z, yaw = camera_xz_yaw
+    ahead, right = (-math.sin(yaw), -math.cos(yaw)), (math.cos(yaw), -math.sin(yaw))
+    sideways = (columns - width / 2) / ((width / 2) / math.tan(math.radians(hfov_deg) / 2)) * metres
+    hit_x = cam_x + metres * ahead[0] + sideways * right[0]
+    hit_z = cam_z + metres * ahead[1] + sideways * right[1]
+    points = np.asarray(perimeter_xz, dtype=float)
+    gap = np.hypot(points[:, None, 0] - hit_x[None, :], points[:, None, 1] - hit_z[None, :])
+    return gap.min(axis=1) <= tolerance_m
