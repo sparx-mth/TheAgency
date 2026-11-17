@@ -1,0 +1,621 @@
+{
+  "campaign": {
+    "agent": "sparx-rpt-llm-host-sweep",
+    "complete": false,
+    "dataset_version": "v1",
+    "episodes": 20,
+    "episodes_published": 2000,
+    "overall": {
+      "distance_to_goal_m": 2.925787982624024,
+      "key": "all",
+      "mean_path_length_m": 21.846730025430443,
+      "mean_steps": 199.95,
+      "n_episodes": 20,
+      "n_unreachable_end": 0,
+      "soft_spl": 0.4889098910772166,
+      "spl": 0.48702910359639723,
+      "spl_ci": [
+        0.33574199885139533,
+        0.6196279382804015
+      ],
+      "success_rate": 0.75,
+      "success_rate_ci": [
+        0.531299122381256,
+        0.8881382985923343
+      ]
+    },
+    "scenes_expected": 20,
+    "scenes_published": 20,
+    "scenes_unfinished": [],
+    "scenes_with_rows": 20,
+    "scenes_without_rows": [],
+    "split": "val"
+  },
+  "provenance": {
+    "allow_stair_traversal": false,
+    "duration_h": 0.12,
+    "exit_code": "0",
+    "finished_utc": "2026-11-17T15:14:00Z",
+    "ground_truth": {
+      "min_pixels": 64,
+      "on_object_m": 0.25
+    },
+    "lean_records": false,
+    "llm": {
+      "backend": "ollama",
+      "labels": "qwen2.5:3b-instruct",
+      "oracle": "qwen2.5:3b-instruct",
+      "oracle_max_tokens": 1536,
+      "oracle_num_ctx": 8192,
+      "seed": 17,
+      "temperature": 0.0
+    },
+    "node_oracle": {
+      "model": {
+        "digest": "357c53fb659c5076de1d65ccb0b397446227b71a42be9d1603d46168015c9e4b",
+        "name": "qwen2.5:3b-instruct",
+        "prompt_tuned_on_it": true
+      },
+      "prompt": {
+        "sha256": "2d025f019f981fe50b368f7eac5be758ac3bacc41661b41e977ea6f1e0ae8b2f",
+        "system_chars": 3091,
+        "tuned_on": "qwen2.5:3b-instruct",
+        "version": "facts-qwen2.5-3b-v1"
+      }
+    },
+    "perception": "ground-truth",
+    "protocol_id": "hm3d-objectnav-v1-val/2",
+    "recording": {
+      "enabled": true,
+      "fps": 6,
+      "frames": false,
+      "video": false
+    },
+    "run_root": "/home/user1/GIT/TheAgency/runs/hm3d_v1_gt_3b_vs_14b_smoke/stage1_3b",
+    "runtime": {
+      "habitat-sim": "0.2.4",
+      "networkx": "3.2.1",
+      "numpy": "1.26.4",
+      "numpy-quaternion": "2023.0.4",
+      "opencv-python": "4.11.0",
+      "requests": "2.32.5",
+      "scikit-image": "0.24.0",
+      "scipy": "1.13.1"
+    },
+    "scenes_with_run_json": 20,
+    "seed": 17,
+    "source_commit": "a13214e2f18169c59a24bc8a9ee03f4faf51dba4",
+    "source_tree_clean": false,
+    "started_utc": "2026-11-17T15:06:59Z"
+  },
+  "summary": {
+    "agent": "sparx-rpt-llm-host-sweep",
+    "agent_errors": 0,
+    "benchmark": "hm3d_v1",
+    "by_category": [
+      {
+        "distance_to_goal_m": 6.673011269420385,
+        "key": "bed",
+        "mean_path_length_m": 46.57466058634943,
+        "mean_steps": 422.5,
+        "n_episodes": 4,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.08820732212673993,
+        "spl": 0.0685688980178816,
+        "spl_ci": [
+          0.0,
+          0.2057066940536448
+        ],
+        "success_rate": 0.25,
+        "success_rate_ci": [
+          0.0455872608097006,
+          0.699358157417598
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.028461291454732418,
+        "key": "chair",
+        "mean_path_length_m": 10.534413425789362,
+        "mean_steps": 96.75,
+        "n_episodes": 4,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.6029917196253265,
+        "spl": 0.6066695892717962,
+        "spl_ci": [
+          0.36603489595740957,
+          0.8473042825861827
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.5101091635454027,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.03298505023121834,
+        "key": "plant",
+        "mean_path_length_m": 5.588089543281901,
+        "mean_steps": 46.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.8074053472694125,
+        "spl": 0.8133080891592366,
+        "spl_ci": [
+          0.8133080891592366,
+          0.8133080891592366
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.04082008947928747,
+        "key": "sofa",
+        "mean_path_length_m": 7.650281662712042,
+        "mean_steps": 90.66666666666667,
+        "n_episodes": 3,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.7354981897233256,
+        "spl": 0.7420809427006975,
+        "spl_ci": [
+          0.7052301154970015,
+          0.7628004317695752
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.4385029682449546,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 6.289141971245408,
+        "key": "toilet",
+        "mean_path_length_m": 29.775059388273014,
+        "mean_steps": 260.6,
+        "n_episodes": 5,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.4486747315893208,
+        "spl": 0.4465406906704845,
+        "spl_ci": [
+          0.1251236564605966,
+          0.7679577248803724
+        ],
+        "success_rate": 0.6,
+        "success_rate_ci": [
+          0.23072428127601297,
+          0.8823792257673521
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.03623807802796364,
+        "key": "tv_monitor",
+        "mean_path_length_m": 10.361357662423545,
+        "mean_steps": 100.33333333333333,
+        "n_episodes": 3,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.5853760267166911,
+        "spl": 0.5891245840518273,
+        "spl_ci": [
+          0.38973559450536716,
+          0.6981505778241265
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.4385029682449546,
+          1.0
+        ]
+      }
+    ],
+    "by_scene": [
+      {
+        "distance_to_goal_m": 23.36640739440918,
+        "key": "00800-TEEsavR23oF",
+        "mean_path_length_m": 64.73744237729521,
+        "mean_steps": 500.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.0,
+        "spl": 0.0,
+        "spl_ci": [
+          0.0,
+          0.0
+        ],
+        "success_rate": 0.0,
+        "success_rate_ci": [
+          0.0,
+          0.7934506856227626
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.023214565590023994,
+        "key": "00802-wcojb4TFT35",
+        "mean_path_length_m": 5.749999819807012,
+        "mean_steps": 87.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.7903018475401972,
+        "spl": 0.794339163421505,
+        "spl_ci": [
+          0.794339163421505,
+          0.794339163421505
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.04012810066342354,
+        "key": "00813-svBbv1Pavdk",
+        "mean_path_length_m": 15.55880440674094,
+        "mean_steps": 142.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.3871564695537071,
+        "spl": 0.38973559450536716,
+        "spl_ci": [
+          0.38973559450536716,
+          0.38973559450536716
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.04519333317875862,
+        "key": "00814-p53SfW6mjZe",
+        "mean_path_length_m": 6.703138893646651,
+        "mean_steps": 115.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.7514701658509084,
+        "spl": 0.7582122808355156,
+        "spl_ci": [
+          0.7582122808355156,
+          0.7582122808355156
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 11.297163963317871,
+        "key": "00820-mL8ThkuaVTM",
+        "mean_path_length_m": 49.10132229770979,
+        "mean_steps": 500.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.0,
+        "spl": 0.0,
+        "spl_ci": [
+          0.0,
+          0.0
+        ],
+        "success_rate": 0.0,
+        "success_rate_ci": [
+          0.0,
+          0.7934506856227626
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.020228639245033264,
+        "key": "00824-Dd4bFSTQ8gi",
+        "mean_path_length_m": 11.569443624547873,
+        "mean_steps": 143.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.4674034414111963,
+        "spl": 0.4691518953474005,
+        "spl_ci": [
+          0.4691518953474005,
+          0.4691518953474005
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.02116597443819046,
+        "key": "00829-QaLdnwvtxbs",
+        "mean_path_length_m": 18.31794790649727,
+        "mean_steps": 137.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.2617624191882804,
+        "spl": 0.26291789656741865,
+        "spl_ci": [
+          0.26291789656741865,
+          0.26291789656741865
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.018595699220895767,
+        "key": "00832-qyAac8rV8Zk",
+        "mean_path_length_m": 4.499999684021725,
+        "mean_steps": 52.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.6940181999293181,
+        "spl": 0.6981505778241265,
+        "spl_ci": [
+          0.6981505778241265,
+          0.6981505778241265
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.04407408833503723,
+        "key": "00835-q3zU7Yy5E5s",
+        "mean_path_length_m": 4.310171641162055,
+        "mean_steps": 54.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.7525748324189298,
+        "spl": 0.7628004317695752,
+        "spl_ci": [
+          0.7628004317695752,
+          0.7628004317695752
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 7.953451156616211,
+        "key": "00839-zt1RVoi7PcG",
+        "mean_path_length_m": 57.21690578944199,
+        "mean_steps": 500.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.027024444792323264,
+        "spl": 0.0,
+        "spl_ci": [
+          0.0,
+          0.0
+        ],
+        "success_rate": 0.0,
+        "success_rate_ci": [
+          0.0,
+          0.7934506856227626
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.06538692116737366,
+        "key": "00843-DYehNKdT76V",
+        "mean_path_length_m": 16.742498124468376,
+        "mean_steps": 156.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.6217128363724373,
+        "spl": 0.625618282302983,
+        "spl_ci": [
+          0.625618282302983,
+          0.625618282302983
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.03298505023121834,
+        "key": "00848-ziup5kvtCCR",
+        "mean_path_length_m": 5.588089543281901,
+        "mean_steps": 46.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.8074053472694125,
+        "spl": 0.8133080891592366,
+        "spl_ci": [
+          0.8133080891592366,
+          0.8133080891592366
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.04999043419957161,
+        "key": "00853-5cdEh9F2hJL",
+        "mean_path_length_m": 11.025268896507969,
+        "mean_steps": 107.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.674953410667048,
+        "spl": 0.6794875798259884,
+        "spl_ci": [
+          0.6794875798259884,
+          0.6794875798259884
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 9.547728538513184,
+        "key": "00873-bxsVRursffK",
+        "mean_path_length_m": 63.23592078045577,
+        "mean_steps": 500.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.04140172693226688,
+        "spl": 0.0,
+        "spl_ci": [
+          0.0,
+          0.0
+        ],
+        "success_rate": 0.0,
+        "success_rate_ci": [
+          0.0,
+          0.7934506856227626
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.03948231041431427,
+        "key": "00876-mv2HUxq3B53",
+        "mean_path_length_m": 6.499997206143087,
+        "mean_steps": 45.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.8618471177493736,
+        "spl": 0.8679213219624154,
+        "spl_ci": [
+          0.8679213219624154,
+          0.8679213219624154
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.036114081740379333,
+        "key": "00877-4ok3usBNeis",
+        "mean_path_length_m": 21.803849423329005,
+        "mean_steps": 190.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.2726192752882276,
+        "spl": 0.2742755920715264,
+        "spl_ci": [
+          0.2742755920715264,
+          0.2742755920715264
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 5.811038494110107,
+        "key": "00878-XB4GS9ShBRE",
+        "mean_path_length_m": 52.15754984390315,
+        "mean_steps": 500.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.03880828628646523,
+        "spl": 0.0,
+        "spl_ci": [
+          0.0,
+          0.0
+        ],
+        "success_rate": 0.0,
+        "success_rate_ci": [
+          0.0,
+          0.7934506856227626
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.037249818444252014,
+        "key": "00880-Nfvxx8J5NCo",
+        "mean_path_length_m": 4.428450830352469,
+        "mean_steps": 60.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.804334529241646,
+        "spl": 0.8127460076279346,
+        "spl_ci": [
+          0.8127460076279346,
+          0.8127460076279346
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.03296824172139168,
+        "key": "00890-6s7QHgap2fW",
+        "mean_path_length_m": 5.750264965969215,
+        "mean_steps": 62.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.8209539001524557,
+        "spl": 0.82668724320995,
+        "spl_ci": [
+          0.82668724320995,
+          0.82668724320995
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      },
+      {
+        "distance_to_goal_m": 0.033192846924066544,
+        "key": "00891-cvZr5TUy5C5",
+        "mean_path_length_m": 11.93753445332742,
+        "mean_steps": 103.0,
+        "n_episodes": 1,
+        "n_unreachable_end": 0,
+        "soft_spl": 0.7024495709001385,
+        "spl": 0.7052301154970015,
+        "spl_ci": [
+          0.7052301154970015,
+          0.7052301154970015
+        ],
+        "success_rate": 1.0,
+        "success_rate_ci": [
+          0.20654931437723745,
+          1.0
+        ]
+      }
+    ],
+    "confidence": 0.95,
+    "overall": {
+      "distance_to_goal_m": 2.925787982624024,
+      "key": "all",
+      "mean_path_length_m": 21.846730025430443,
+      "mean_steps": 199.95,
+      "n_episodes": 20,
+      "n_unreachable_end": 0,
+      "soft_spl": 0.4889098910772166,
+      "spl": 0.48702910359639723,
+      "spl_ci": [
+        0.33574199885139533,
+        0.6196279382804015
+      ],
+      "success_rate": 0.75,
+      "success_rate_ci": [
+        0.531299122381256,
+        0.8881382985923343
+      ]
+    },
+    "split": "val",
+    "terminations": {
+      "agent_error": 0,
+      "step_limit": 5,
+      "stop": 15
+    }
+  },
+  "title": "HM3D v1 val, ground-truth perception, qwen2.5:3b-instruct in both LLM roles, prompt facts-qwen2.5-3b-v1 (SMOKE: one episode per scene)"
+}
