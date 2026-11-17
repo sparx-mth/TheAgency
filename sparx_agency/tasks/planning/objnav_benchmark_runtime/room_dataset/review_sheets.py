@@ -9,6 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.geometry import habitat_position
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.room_names import majority_name
 
 FRAME_SHOWN = (460, 345)
@@ -62,8 +63,9 @@ def floor_map(cells, regions, room, chosen):
     for (x, _, z), region in zip(cells[near_floor], regions[near_floor]):
         cv2.circle(image, pixel(x, z), 3, ROOM_COLOUR if region == room["region"] else OTHER_COLOUR, -1)
     for letter, view in zip(string.ascii_uppercase, chosen):
-        centre = pixel(view["x"], view["z"])
-        tip = pixel(view["x"] - 0.8 * np.sin(view["yaw"]), view["z"] - 0.8 * np.cos(view["yaw"]))
+        x, _, z = habitat_position(view)
+        centre = pixel(x, z)
+        tip = pixel(x - 0.8 * np.sin(view["yaw"]), z - 0.8 * np.cos(view["yaw"]))
         cv2.arrowedLine(image, centre, tip, SPOT_COLOUR, 2, tipLength=0.35)
         cv2.putText(image, letter, (centre[0] + 4, centre[1] - 4), FONT, 0.7, SPOT_COLOUR, 2)
     return image

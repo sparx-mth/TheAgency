@@ -2,6 +2,8 @@
 import hashlib
 import math
 
+import numpy as np
+
 APPROACH_DISTANCES_M = (4.5, 3.5, 2.5, 1.8, 1.2, 0.8)
 HELD_OUT_SALT = "object-views-1"
 
@@ -9,6 +11,11 @@ HELD_OUT_SALT = "object-views-1"
 def yaw_toward(from_xz, to_xz):
     dx, dz = to_xz[0] - from_xz[0], to_xz[1] - from_xz[1]
     return math.atan2(-dx, -dz)
+
+
+def habitat_position(view):
+    """The stored pose is the public ENU one: x = -habitat z, y = -habitat x, z = habitat y."""
+    return np.array([-view["y"], view["z"], -view["x"]])
 
 
 def forward_xz(yaw):

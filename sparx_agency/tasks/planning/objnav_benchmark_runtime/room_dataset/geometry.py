@@ -56,3 +56,38 @@ def in_box_share(depth_m, camera_xz_yaw, box_xz, width, height, hfov_deg, margin
     z = cam_z + metres * ahead[1] + sideways * right[1]
     x0, z0, x1, z1 = box_xz
     return float(((x >= x0 - margin_m) & (x <= x1 + margin_m) & (z >= z0 - margin_m) & (z <= z1 + margin_m)).mean())
+
+
+def visible_cells(depth_m, camera_xyz_yaw, cells_xyz, width, height, hfov_deg, tolerance_m=0.3):
+    """Which floor cells lie in front of the camera: inside its horizontal field of view and not behind a nearer surface at the horizon row; no depth there counts as blocked."""
+    cam_x, _, cam_z, yaw = camera_xyz_yaw
+    cells = np.asarray(cells_xyz, dtype=float).reshape(-1, 3)
+    ahead, right = (-math.sin(yaw), -math.cos(yaw)), (math.cos(yaw), -math.sin(yaw))
+    dx, dz = cells[:, 0] - cam_x, cells[:, 2] - cam_z
+    forward = dx * ahead[0] + dz * ahead[1]
+    focal = (width / 2) / math.tan(math.radians(hfov_deg) / 2)
+    in_front = forward > 0.1
+    column = np.round(width / 2 + focal * (dx * right[0] + dz * right[1]) / np.where(in_front, forward, 1.0)).astype(int)
+    inside = in_front & (column >= 0) & (column < width)
+    surface = np.asarray(depth_m, dtype=float)[height // 2, np.clip(column, 0, width - 1)]
+    return inside & np.isfinite(surface) & (surface > 0) & (surface >= forward - tolerance_m)
+
+
+def greedy_views(seen_masks, count, min_new):
+    """Indices of up to ``count`` views, each adding the most cells no earlier pick saw; stops below ``min_new`` new cells."""
+    covered = np.zeros(len(seen_masks[0]), dtype=bool)
+    chosen = []
+    while len(chosen) < count:
+        gains = [int((mask & ~covered).sum()) for mask in seen_masks]
+        best = int(np.argmax(gains))
+        if gains[best] < min_new:
+            break
+        chosen.append(best)
+        covered |= seen_masks[best]
+    return chosen
+
+
+def near_share(depth_m, near_m):
+    """The share of pixels closer than ``near_m`` or without depth (nearer than the sensor sees): high for a wall or door in the camera's face."""
+    depth = np.asarray(depth_m, dtype=float)
+    return float((~np.isfinite(depth) | (depth <= 0) | (depth < near_m)).mean())

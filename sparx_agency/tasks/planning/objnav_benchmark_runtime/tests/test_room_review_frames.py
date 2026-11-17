@@ -54,3 +54,12 @@ def test_a_frame_looking_far_away_is_not_picked_even_when_it_is_all_in_the_room(
 def test_with_no_far_limit_a_far_frame_is_returned():
     far = dict(view("far", 0, [(7, 900)]), far_fraction=0.9)
     assert [v["frame"] for v in pick_frames([far], count=6, max_far=1.0)] == ["far"]
+
+
+def test_the_map_draws_a_view_where_it_stands_on_the_habitat_floor_even_though_its_pose_is_stored_in_enu():
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.review_sheets import SPOT_COLOUR, floor_map
+    cells = np.array([[0.0, 0.0, 0.0], [4.0, 0.0, 4.0]])
+    room = {"region": 1, "floor_y": 0.0}
+    standing_at_habitat_2_2 = {"x": -2.0, "y": -2.0, "z": 0.9, "yaw": 0.0}
+    image = floor_map(cells, np.array([1, 1]), room, [standing_at_habitat_2_2])
+    assert tuple(image[280, 280]) == SPOT_COLOUR

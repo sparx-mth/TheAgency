@@ -11,15 +11,10 @@ from sparx_agency.core.planning.objnav.errors import EnvContractError
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.sample_frames import yaw_quaternion_wxyz
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import protocol_for
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.geometry import is_held_out
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.geometry import habitat_position, is_held_out
 
 DEPTH_MM_MAX = 65000
 MAX_MEAN_RGB_DIFF = 6.0
-
-
-def habitat_position(view):
-    """The stored pose is the public ENU one: x = -habitat z, y = -habitat x, z = habitat y."""
-    return np.array([-view["y"], view["z"], -view["x"]])
 
 
 def is_complete(folder):
