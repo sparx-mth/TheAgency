@@ -673,6 +673,48 @@ Per-episode, `evaluation_diagnostics.jsonl` carries `ground_truth`: frames
 served, frames with nothing annotated, lookup misses (always 0; a frame the
 oracle was not given ends the run) and the scene report above.
 
+### 3.6 Two models under one prompt, one command: `run_gt_3b_then_14b.sh`
+
+The model comparison of 2026-11-17 -- the full v1 val split under ground-truth
+perception with `qwen2.5:3b-instruct` in both LLM roles, then again with
+`qwen2.5:14b-instruct`, both asked under the 3B's prompt version
+`facts-qwen2.5-3b-v1` (digest `2d025f01...`) so that only the model differs --
+is one command, resumable by re-running it:
+
+```bash
+hm3d/run_gt_3b_then_14b.sh              # both stages, 2,000 episodes each; re-run to resume
+hm3d/run_gt_3b_then_14b.sh --status     # one line per stage and the live per-scene progress
+hm3d/run_gt_3b_then_14b.sh --smoke      # one episode per scene per stage, the same checks and commits
+```
+
+Before each stage it checks that the checkout is on `feat/objnav-habitat-hm3d-nadav`
+and contains `a13214e2`, that a native Ollama holds both models (pulling them if
+not), that the launcher's preflight passes with the prompt version and digest
+above, the right model in both roles, ground-truth perception, full records and
+the log-only recording -- and, once the run is up, that Ollama answers, the
+workers are alive and the first scene's `run.json` carries the same prompt
+digest. The 14B asked under the 3B's prompt is recorded, not refused
+(`node_oracle.model.prompt_tuned_on_it: false`). After each stage it writes
+`results_summary.py`'s directory under `hm3d/results/<run name>/` (SR and SPL
+overall and per category, the episode count, the model, the prompt version and
+digest, the source commit, start and end times; `episodes.csv`, `run.json`,
+`campaign_summary.json`) and commits and pushes it -- never force; a failed push
+leaves the commit local and the next stage starts. Everything else stays under
+`runs/<campaign>/`: the full per-episode records, every episode's `steps.jsonl`,
+`trajectory.csv` and map journal (`--record-log-only`, ~9 MB an episode), the
+LLM answer stores (every request with its prompts and reply), the console logs,
+the Ollama log, `source-commit.txt` / `source-changes.diff`, and
+`support/stage*_utilization.csv` (`../utilization_log.py`, every 15 s).
+
+Parallelism is fixed in the script, not by `--jobs max` (which sizes itself on
+the VRAM free *before* the LLM is loaded and over-commits the card): 20 workers
+and 10 Ollama slots for the 3B (VRAM 81 %, CPU up to 63 %, RAM 37 % in the smoke;
+20 is one process per scene, the campaign's ceiling), 8 workers and 4 slots for
+the 14B (9 workers measured 91 % of VRAM; 8 is ~88 %). GPU compute stays low
+under both (16 % / 38 % mean) because Ollama's runner samples the JSON reply on
+one CPU thread per request: the 3B's oracle call takes ~25 s with 20 workers on
+10 slots, the 14B's ~10 s with 8-9 workers on 4.
+
 ### Reproducible runs and paired comparisons
 
 The room LLM is not reproducible by itself: Ollama at temperature 0 with a fixed seed answers the same prompt
@@ -835,6 +877,7 @@ issue.
 | `report.py` | the comparison table, the 0.2 m re-score, the audit, shard merging |
 | `campaign_breakdown.py` | what a finished campaign is read with: SR / SPL / DTG overall, per category and same- vs cross-storey (the goal's storey against the start's, from `sets/hm3d_v1_val_levels.csv`), one failure-mechanism tag per failed episode from the full records, the LLM's health, per-scene runtime and the `../utilization_log.py` summary |
 | `episode_levels.py`, `sets/hm3d_v1_val_levels.csv` | the level survey of a split (storeys, where each start stands, the nearest goal view point's storey) and the shipped survey of v1 val (1,652 same-storey goals, 348 cross-storey) |
+| `run_gt_3b_then_14b.sh`, `results_summary.py`, `results/` | the one-command 3B-then-14B comparison of section 3.6, its committable per-stage summary (`results/<run name>/summary.md` + `.json`, `episodes.csv`, `run.json`, `campaign_summary.json`, `campaign_metrics.csv`: the `gibson/results/` convention) |
 | `compare_campaigns.py` | two campaign roots on the same episodes, paired: SR / SPL / DTG per arm and the B − A differences with bootstrap intervals and McNemar, overall, per category, by storey and per category × storey; storey transitions per episode; flips with each arm's failure mechanism; the pairing-integrity check (entry 048: stairs on against off) |
 | `sets/policy_stairs_on.json` | the one-line `--policy-config` that turns `allow_stair_traversal` on (Run 2 of entry 048); everything else stays the launcher's default |
 | `sota.py` | the published numbers, with the table each came from |

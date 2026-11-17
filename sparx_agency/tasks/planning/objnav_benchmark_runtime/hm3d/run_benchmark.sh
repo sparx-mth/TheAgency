@@ -9,6 +9,9 @@
 #   hm3d/run_benchmark.sh --smoke                           # the minimal cover: one published episode per scene, every category at least once
 #   hm3d/run_benchmark.sh --limit 2 --record                # the first two published episodes of every scene, recorded
 #   hm3d/run_benchmark.sh --limit 2 --record --save-frames  # ... plus every dashboard frame as a JPEG still (frames/)
+#   hm3d/run_benchmark.sh --version v1 --record-log-only --jobs 8
+#                                                           # every episode's step log, trajectory and map journal under
+#                                                           # <scene>/recordings/<key>/, no video and no FFmpeg (as mp3d/run_benchmark.sh)
 #   hm3d/run_benchmark.sh --category toilet --limit 3       # the published toilet episodes, three per scene
 #   hm3d/run_benchmark.sh --version v1 --episode-ids-file cases.json --record --jobs 2
 #                                                           # exactly the JSON list's <scene>/<index> episodes (a re-run of chosen cases)
@@ -57,7 +60,7 @@
 #                        by this much; the module default, 0.25, when empty; 0 reports the raw sensor)
 set -euo pipefail
 
-usage() { sed -n '2,57p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # -- where things are ---------------------------------------------------------------------
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -76,7 +79,7 @@ PROGRESS_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.progress
 POOL_MODULE=sparx_agency.tasks.planning.objnav_benchmark_runtime.scene_pool
 
 # -- the command line -----------------------------------------------------------------------
-EPISODE_FILE="" VERSION="v2" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=() ACCEPT=() STALL_MINUTES=""
+EPISODE_FILE="" VERSION="v2" OUTPUT="" SCENE="" LIMIT="" SMOKE=0 RECORD=0 RECORD_LOG=0 PREFLIGHT=0 STATUS="" LEAN=1 CATEGORY="" AGENT="rpt" JOBS=1 SCENES=() EXTRA=() ACCEPT=() STALL_MINUTES=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -96,6 +99,7 @@ while [[ $# -gt 0 ]]; do
     --episode-ids-file) EPISODE_FILE="$2"; shift 2 ;;          # campaign: a JSON list of <scene>/<index> ids, one process per scene
     --category) CATEGORY="$2"; EXTRA+=(--category "$2"); shift 2 ;;   # forwarded; also names the default output directory
     --record) RECORD=1; shift ;;
+    --record-log-only) RECORD_LOG=1; shift ;;                 # the step log, trajectory and map journal of every episode; no video, no FFmpeg
     --full-records) LEAN=0; shift ;;
     --preflight) PREFLIGHT=1; shift ;;
     --status) STATUS="$2"; shift 2 ;;
@@ -188,6 +192,7 @@ if [[ "$PERCEPTION" == ground-truth ]]; then CHILD_ARGS+=("${PERCEPTION_FLAGS[@]
 else CHILD_ARGS+=(--detector-url "$DETECTOR_URL" --detector-backend yolo_world); fi
 [[ "$AGENT" == rpt ]] && CHILD_ARGS+=(--explorer frontier)        # as gibson/run_benchmark.sh: the baseline explores with FALCON only
 [[ "$RECORD" == 1 ]] && CHILD_ARGS+=(--record)
+[[ "$RECORD_LOG" == 1 ]] && CHILD_ARGS+=(--record-log-only)
 [[ "$LEAN" == 1 ]] && CHILD_ARGS+=(--lean)
 [[ "$ALLOW_SHARED_GPU" == 1 ]] && CHILD_ARGS+=(--allow-shared-gpu)
 [[ ${#SEGMENTER_FLAGS[@]} -gt 0 ]] && CHILD_ARGS+=("${SEGMENTER_FLAGS[@]}")

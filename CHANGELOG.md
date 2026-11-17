@@ -5,6 +5,21 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-17, the 3B-then-14B HM3D v1 GT comparison as one resumable command -- hm3d/README.md section 3.6)
+- **`hm3d/run_gt_3b_then_14b.sh`**: two full ground-truth runs of the v1 val split in sequence, `qwen2.5:3b-instruct` then
+  `qwen2.5:14b-instruct` in both LLM roles under the same prompt version `facts-qwen2.5-3b-v1`; checks the branch and
+  commit, the models in Ollama (pulls them), the preflight's prompt digest and roles, the services and the first
+  `run.json`; resumes by re-run; fixed parallelism (20 workers / 10 slots, 8 / 4) instead of `--jobs max`; and after each
+  stage writes, commits and pushes `hm3d/results/<run name>/` (never force; a failed push is logged and the next stage runs).
+- **`hm3d/results_summary.py`** and the `hm3d/results/` convention (as `gibson/results/`): SR and SPL overall and per
+  category with intervals, episodes, the LLM per role, the prompt version and digest and whether it was tuned on the model
+  that answered, the source commit and tree state, perception, start and end times; `episodes.csv`, `run.json`,
+  `campaign_summary.json` beside it.
+- **`hm3d.run --record-log-only`** and `hm3d/run_benchmark.sh --record-log-only`, MP3D's flag ported: every episode's
+  `steps.jsonl`, `trajectory.csv` and map journal, no video and no FFmpeg (~9 MB an episode on HM3D).
+- Smoke of 2026-11-17 (one episode per scene per stage, committed as `hm3d/results/hm3d_v1_gt_3b_vs_14b_smoke_*`): the 3B
+  at 20 workers takes VRAM 81 %, CPU up to 63 %, RAM 37 %, its oracle calls 25 s each (Ollama's one sampling thread shared
+  by 20 workers); the 14B at 9 workers reached 91 % of VRAM, so the full run uses 8.
 ### Changed (2026-11-16, evening: the STOP is taken inside each benchmark's own success zone; the blind-step fix and the 0.20 m retry clearance are withdrawn; the launcher's oracle model is the 3B)
 
 Five items asked for after the day's first check (the entry below, which this one revises): bring back the

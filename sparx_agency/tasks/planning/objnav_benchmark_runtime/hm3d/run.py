@@ -82,6 +82,12 @@ def parser():
     p.add_argument("--shards", type=int, default=1)
     p.add_argument("--shard-index", type=int, default=0)
     p.add_argument("--record", action="store_true")
+    p.add_argument("--record-log-only", action="store_true",
+                   help="Record every episode's log -- steps.jsonl (pose, action, the method's snapshot and the "
+                        "command of every decision), trajectory.csv, the map journal, metrics.json -- under "
+                        "recordings/<key>/ and render no dashboard frame: no video, no stills, no FFmpeg. "
+                        "The record of a full-split run that must stay reviewable (MP3D's flag, 2026-11-11; here "
+                        "since 2026-11-17); a video of any episode can be re-made by replaying it")
     p.add_argument("--video-fps", type=int, default=6)
     p.add_argument("--save-frames", action="store_true",
                    help="With --record, also keep every dashboard frame as a JPEG still under "
@@ -179,6 +185,8 @@ def prepare(args):
         even when ``issues`` is non-empty so the caller can close it.
     """
     issues = []
+    if args.record_log_only:
+        args.record = True          # the log-only recording is a recording without its video (as mp3d.run)
     protocol = protocol_for(args.version).with_split(args.split)
     development = protocol.split != "val"
     subset = bool(args.scenes or args.limit or args.shards > 1 or development
@@ -197,9 +205,11 @@ def prepare(args):
         issues.append("--video-fps must be between 1 and 60")
     if args.save_frames and not args.record:
         issues.append("--save-frames keeps the recorder's frames and so needs --record")
+    if args.save_frames and args.record_log_only:
+        issues.append("--save-frames keeps the dashboard frames; --record-log-only renders none")
     if args.exclude_unreachable and not args.validate_starts:
         issues.append("--exclude-unreachable needs --validate-starts to find them")
-    if args.record:
+    if args.record and not args.record_log_only:
         try:
             from sparx_agency.tasks.planning.objnav_benchmark_runtime.recording import (
                 ffmpeg_executable)
@@ -296,7 +306,8 @@ def prepare(args):
         "episode_ids": list(args.episode_ids) if args.episode_ids else None,
         "lean_records": bool(args.lean),
         "allow_shared_gpu": args.allow_shared_gpu,
-        "recording": {"enabled": args.record, "fps": args.video_fps, "frames": bool(args.save_frames)},
+        "recording": {"enabled": args.record, "video": bool(args.record and not args.record_log_only),
+                      "fps": args.video_fps, "frames": bool(args.save_frames)},
         "split": protocol.split,
         "published_split": not development,
         "starts_validated": bool(args.validate_starts),
