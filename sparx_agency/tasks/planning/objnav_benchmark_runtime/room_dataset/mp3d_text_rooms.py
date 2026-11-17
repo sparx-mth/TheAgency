@@ -4,13 +4,14 @@ import json
 from pathlib import Path
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_eval import objects_prompt, objects_text
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_house import clean_category
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_vlm_rooms import ask
 
 
 def object_lists(rooms, source, kind):
     """``{room: [object names]}``: the annotated objects of each region, or a detector's ``inside`` / ``all`` list from its objects file."""
     if source == "annotated":
-        return {r["room"]: r["objects"] for f in sorted(rooms.iterdir()) if (f / "regions.json").exists()
+        return {r["room"]: [n for n in r["objects"] if clean_category(n)] for f in sorted(rooms.iterdir()) if (f / "regions.json").exists()
                 for r in json.loads((f / "regions.json").read_text())["rooms"]}
     return {room: found[kind] for room, found in json.loads((rooms / ("objects_%s.json" % source)).read_text()).items()}
 

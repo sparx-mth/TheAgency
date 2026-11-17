@@ -42,8 +42,9 @@ def main(argv=None):
     p.add_argument("--detector-url", required=True)
     p.add_argument("--backend", required=True)
     p.add_argument("--name", required=True)
+    p.add_argument("--vocabulary", type=Path, default=DEFAULT_VOCABULARY, help="comma-separated words, in the order the server was started with")
     args = p.parse_args(argv)
-    vocabulary = [w for w in DEFAULT_VOCABULARY.read_text().strip().split(",") if w]
+    vocabulary = [w for w in args.vocabulary.read_text().strip().split(",") if w]
     detector = HttpDetector(args.detector_url, vocabulary, timeout_s=120.0, expected_backend=args.backend)
     found = {}
     for folder in sorted(d for d in args.rooms.iterdir() if (d / "regions.json").exists()):

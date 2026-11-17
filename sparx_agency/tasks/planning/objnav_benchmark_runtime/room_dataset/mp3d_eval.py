@@ -62,3 +62,28 @@ def objects_prompt(objects, with_list):
     options = " Choose one of: %s." % ", ".join(ROOM_POOL) if with_list else ""
     return ('A room of a house contains these objects: %s. What kind of room is it?%s Answer with JSON {"room": "<name>"}.'
             % (objects, options))
+
+
+def vote_counts(answers):
+    """The groups the answers read as with their votes, most voted first; ties in ``ROOM_POOL`` order."""
+    counts = collections.Counter(g for g in map(group_of_answer, answers) if g)
+    return sorted(counts.items(), key=lambda kv: (-kv[1], ROOM_POOL.index(kv[0])))
+
+
+def fused_prompt(objects, votes, with_list):
+    options = " Choose one of: %s." % ", ".join(ROOM_POOL) if with_list else ""
+    tally = ", ".join("%s %d" % (g, n) for g, n in votes) or "no clear answer"
+    return ('A room of a house contains these objects: %s. Photos taken in the room were judged to show these room types (number of photos): %s. '
+            'What kind of room is it?%s Answer with JSON {"room": "<name>"}.' % (objects, tally, options))
+
+
+def agreement_summary(first, second, truth):
+    """Rooms where two methods agree and are right, and where only the first, only the second or neither is right."""
+    rooms = [r for r in truth if r in first and r in second]
+    right = lambda method, r: method[r] == truth[r]
+    return {"rooms": len(rooms),
+            "agree": sum(first[r] == second[r] for r in rooms),
+            "agree_right": sum(first[r] == second[r] and right(first, r) for r in rooms),
+            "only_first": sum(right(first, r) and not right(second, r) for r in rooms),
+            "only_second": sum(right(second, r) and not right(first, r) for r in rooms),
+            "neither": sum(not right(first, r) and not right(second, r) for r in rooms)}

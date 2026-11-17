@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import pytest
 
@@ -98,3 +99,10 @@ C  3  4 wall#/#other#room  1 x  0 0 0 0 0
 C  4  5 sofa  1 x  0 0 0 0 0
 """ + "".join("O  %d 0 %d  0 0 0  0 0 1  1 0 0  1 1 1  0 0 0 0 0 0 0 0\n" % (i, i) for i in range(5)))
     assert [o["category"] for o in read_house(path)["objects"]] == ["side table", "sofa"]
+
+
+def test_annotated_object_lists_leave_out_placeholder_names(tmp_path):
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_text_rooms import object_lists
+    (tmp_path / "scene").mkdir()
+    (tmp_path / "scene" / "regions.json").write_text(json.dumps({"rooms": [{"room": "scene_r0", "objects": ["bed", "delete", "lamp"]}]}))
+    assert object_lists(tmp_path, "annotated", "inside") == {"scene_r0": ["bed", "lamp"]}

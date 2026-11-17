@@ -56,3 +56,29 @@ def test_the_open_prompt_offers_no_names_and_the_list_prompt_offers_exactly_the_
 def test_the_objects_prompt_carries_the_object_list_and_the_same_question():
     assert "chair x3, table" in objects_prompt("chair x3, table", with_list=False)
     assert all(option in objects_prompt("bed", with_list=True) for option in ROOM_POOL)
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_eval import agreement_summary, fused_prompt, vote_counts
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_house import clean_category
+
+
+def test_vote_counts_read_each_answer_as_a_group_and_list_the_most_voted_first():
+    assert vote_counts(["Living room", "family room", "kitchen", "spaceship"]) == [("living room", 2), ("kitchen", 1)]
+
+
+def test_the_fused_prompt_carries_the_objects_and_how_the_photos_voted_and_the_pool_when_asked():
+    prompt = fused_prompt("bed, lamp", [("bedroom", 4), ("hallway", 2)], with_list=True)
+    assert "bed, lamp" in prompt and "bedroom 4" in prompt and "hallway 2" in prompt
+    assert all(option in prompt for option in ROOM_POOL)
+    assert "Choose one of" not in fused_prompt("bed", [("bedroom", 1)], with_list=False)
+
+
+def test_agreement_summary_splits_rooms_by_whether_the_two_methods_agree_and_who_was_right():
+    truth = {"a": "kitchen", "b": "kitchen", "c": "bedroom", "d": "bedroom", "e": "hallway"}
+    first = {"a": "kitchen", "b": "kitchen", "c": "kitchen", "d": "bedroom", "e": "hallway"}
+    second = {"a": "kitchen", "b": "bedroom", "c": "bedroom", "d": "kitchen", "e": "bathroom"}
+    assert agreement_summary(first, second, truth) == {"rooms": 5, "agree": 1, "agree_right": 1, "only_first": 3, "only_second": 1, "neither": 0}
+
+
+def test_delete_is_a_placeholder_not_an_object():
+    assert clean_category("delete") is None and clean_category("lamp") == "lamp"

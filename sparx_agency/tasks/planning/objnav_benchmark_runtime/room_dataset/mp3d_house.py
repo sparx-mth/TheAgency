@@ -1,7 +1,7 @@
 """Regions (room type, box) and objects of a Matterport3D scene from its .house file. MP3D is z-up; habitat is y-up with north flipped."""
 
 
-PLACEHOLDER_CATEGORIES = ("remove", "unknown", "")
+PLACEHOLDER_CATEGORIES = ("remove", "delete", "unknown", "")
 
 
 def clean_category(name):
