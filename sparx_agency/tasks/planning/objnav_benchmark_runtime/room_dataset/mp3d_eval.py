@@ -87,3 +87,16 @@ def agreement_summary(first, second, truth):
             "only_first": sum(right(first, r) and not right(second, r) for r in rooms),
             "only_second": sum(right(second, r) and not right(first, r) for r in rooms),
             "neither": sum(not right(first, r) and not right(second, r) for r in rooms)}
+
+
+def first_k_accuracy(answers_by_room, truth, k):
+    """Per room, whether the vote over its first ``k`` answers is the true group."""
+    return {room: predict_group(answers[:k]) == truth[room] for room, answers in answers_by_room.items() if room in truth}
+
+
+def paired_difference(correct_a, correct_b, rng, resamples=2000):
+    """Mean accuracy gain of method A over B on the rooms both scored, with a bootstrap 95% interval over rooms."""
+    rooms = [r for r in correct_a if r in correct_b]
+    gains = np.array([int(correct_a[r]) - int(correct_b[r]) for r in rooms], dtype=float)
+    means = [gains[rng.integers(0, len(gains), len(gains))].mean() for _ in range(resamples)]
+    return float(gains.mean()), float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))

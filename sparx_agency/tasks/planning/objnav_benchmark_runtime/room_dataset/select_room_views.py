@@ -7,26 +7,16 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from sparx_agency.core.planning.objnav.errors import EnvContractError
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.run_detectors import DEFAULT_VOCABULARY
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_sweep.sample_frames import yaw_quaternion_wxyz
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.simulator import HabitatRGBDSimulator
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import protocol_for
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.geometry import habitat_position
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.projection import box_floor_point
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.build_room_frames import DEPTH_MM_MAX
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import (
-    compass_yaws, greedy_views, near_room, near_share, object_coverage, spread_points, visible_cells)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import compass_yaws, spread_points
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.review_sheets import FONT, far_fraction, floor_map, pick_frames
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.view_selection import describe_candidates, select
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
 
-MIN_GAIN = 0.02
-REPEAT_CREDIT = 0.5
-MIN_CONF = 0.3
-SAME_OBJECT_M = 0.6
-ROOM_GAP_M = 0.5
-NEAR_M = 1.0
-MAX_NEAR_SHARE = 0.4
 SHOWN_PER_SIDE = 6
 THUMBNAIL = (320, 240)
 
@@ -44,34 +34,11 @@ def render(simulator, glb, navmesh, cell, yaw):
     return rgb, depth, (float(pose.x), float(pose.y), float(pose.z))
 
 
-def objects_in_room(detector, rgb, depth, camera, room_cells, protocol):
-    placed = []
-    for d in detector.detect(rgb):
-        point = box_floor_point(d.xyxy, depth, (camera[0], camera[2], camera[3]), protocol.width, protocol.height, protocol.hfov_deg) if d.conf >= MIN_CONF else None
-        if point is not None and near_room(point, room_cells, ROOM_GAP_M):
-            placed.append({"cls": d.cls, "point": point})
-    return placed
-
-
 def select_views(simulator, glb, navmesh, room_cells, protocol, args, detector):
     poses = [(room_cells[i], yaw) for i in spread_points(room_cells[:, [0, 2]], args.candidates) for yaw in compass_yaws(args.headings)]
-    rendered, cell_masks, found = [], [], []
-    for cell, yaw in poses:
-        try:
-            rgb, depth, pose = render(simulator, glb, navmesh, cell, yaw)
-        except EnvContractError:
-            continue
-        if near_share(depth, NEAR_M) > MAX_NEAR_SHARE:
-            continue
-        camera = (*habitat_position(dict(zip("xyz", pose))), yaw)
-        rendered.append((cell, yaw))
-        cell_masks.append(visible_cells(depth, camera, room_cells, protocol.width, protocol.height, protocol.hfov_deg))
-        found.append(objects_in_room(detector, rgb, depth, camera, room_cells, protocol) if detector else [])
-    objects, object_masks = object_coverage(found, SAME_OBJECT_M)
-    masks = [np.concatenate([c, o]) for c, o in zip(cell_masks, object_masks)]
-    weights = np.concatenate([np.full(len(room_cells), 1 / len(room_cells)), np.full(len(objects), 1 / max(1, len(objects)))])
-    chosen = greedy_views(masks, args.frames, MIN_GAIN, weights, REPEAT_CREDIT)
-    return [(rendered[i], int(cell_masks[i].sum()), int(object_masks[i].sum())) for i in chosen], len(objects)
+    candidates = describe_candidates(poses, lambda cell, yaw: render(simulator, glb, navmesh, cell, yaw), room_cells, protocol, detector)
+    chosen = select(candidates, args.frames, with_objects=detector is not None)
+    return [((candidates[i]["cell"], candidates[i]["yaw"]), int(candidates[i]["cells"].sum()), len(candidates[i]["objects"])) for i in chosen]
 
 
 def write_view(simulator, glb, navmesh, folder, room, order, pose, seen, objects):
@@ -125,15 +92,15 @@ def main(argv=None):
         simulator = HabitatRGBDSimulator(
             protocol.camera(), protocol.actions(), protocol.agent_radius_m, protocol.allow_sliding, 0, height_m=protocol.agent_height_m,
             navmesh=protocol.navmesh, depth_holes=protocol.depth_holes())
-        picked, distinct_objects = select_views(simulator, glb, navmesh, room_cells, protocol, args, detector)
+        picked = select_views(simulator, glb, navmesh, room_cells, protocol, args, detector)
         new = [write_view(simulator, glb, navmesh, folder, room, i, pose, seen, objects) for i, (pose, seen, objects) in enumerate(picked)]
         simulator.close()
         (folder / ("views_%s.json" % room_name)).write_text(json.dumps(new))
         old = pick_frames([json.loads(line) for line in (old_folder / "views.jsonl").read_text().splitlines() if json.loads(line)["room"] == room_name], count=SHOWN_PER_SIDE)
         image = np.vstack([side(old_folder, cells, room, old, "%s before: spots in the room, compass headings" % room_name),
-                           side(folder, cells, room, new, "%s after: %d views chosen by room floor seen and objects seen (%d objects found)" % (room_name, len(new), distinct_objects))])
+                           side(folder, cells, room, new, "%s after: %d views chosen by room floor seen and objects seen" % (room_name, len(new)))])
         cv2.imwrite(str(args.out / "sheets" / (room_name + ".jpg")), image, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        print(room_name, [(cells_, objects_) for _, cells_, objects_ in picked], "cells and objects seen; room has", len(room_cells), "cells,", distinct_objects, "objects", flush=True)
+        print(room_name, [(cells_, objects_) for _, cells_, objects_ in picked], "cells and objects seen; room has", len(room_cells), "cells", flush=True)
     return 0
 
 

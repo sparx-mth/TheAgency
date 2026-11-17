@@ -82,3 +82,29 @@ def test_agreement_summary_splits_rooms_by_whether_the_two_methods_agree_and_who
 
 def test_delete_is_a_placeholder_not_an_object():
     assert clean_category("delete") is None and clean_category("lamp") == "lamp"
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.build_mp3d_frames import interior_cells
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_eval import first_k_accuracy, paired_difference
+
+
+def test_a_zero_margin_keeps_floor_cells_right_at_the_region_edge():
+    cells = np.array([[0.1, 0.0, 2.0], [2.0, 0.0, 2.0]])
+    keep_all = lambda points: np.ones(len(points), dtype=bool)
+    assert len(interior_cells(cells, (0.0, 0.0, 4.0, 4.0), 0.0, keep_all)) == 1
+    assert len(interior_cells(cells, (0.0, 0.0, 4.0, 4.0), 0.0, keep_all, margin=0.0)) == 2
+
+
+def test_first_k_accuracy_scores_the_vote_over_each_rooms_first_k_answers():
+    answers = {"a": ["kitchen", "bedroom", "bedroom"], "b": ["bedroom", "bedroom", "kitchen"]}
+    truth = {"a": "bedroom", "b": "bedroom"}
+    assert first_k_accuracy(answers, truth, 1) == {"a": False, "b": True}
+    assert first_k_accuracy(answers, truth, 3) == {"a": True, "b": True}
+
+
+def test_paired_difference_is_the_mean_gain_with_an_interval_that_shrinks_with_more_rooms():
+    gain = {r: True for r in range(60)}
+    same = {r: r % 2 == 0 for r in range(60)}
+    mean, low, high = paired_difference(gain, same, np.random.default_rng(0))
+    assert mean == 0.5 and 0.3 < low <= mean <= high < 0.7
+    assert paired_difference(same, same, np.random.default_rng(0)) == (0.0, 0.0, 0.0)

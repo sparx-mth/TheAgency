@@ -37,11 +37,11 @@ def train_scenes(episodes_dir):
     return sorted(p.name.removesuffix(".json.gz") for p in (Path(episodes_dir) / "content").glob("*.json.gz"))
 
 
-def interior_cells(cells, box_xz, floor_y, owner):
-    """Navmesh points on the region's floor, away from its box edges, whose nearest objects belong to the region."""
+def interior_cells(cells, box_xz, floor_y, owner, margin=EDGE_MARGIN_M):
+    """Navmesh points on the region's floor, ``margin`` m away from its box edges, whose nearest objects belong to the region."""
     x0, z0, x1, z1 = box_xz
-    inside = ((cells[:, 0] > x0 + EDGE_MARGIN_M) & (cells[:, 0] < x1 - EDGE_MARGIN_M) & (cells[:, 2] > z0 + EDGE_MARGIN_M)
-              & (cells[:, 2] < z1 - EDGE_MARGIN_M) & (np.abs(cells[:, 1] - floor_y) < SAME_FLOOR_M))
+    inside = ((cells[:, 0] > x0 + margin) & (cells[:, 0] < x1 - margin) & (cells[:, 2] > z0 + margin)
+              & (cells[:, 2] < z1 - margin) & (np.abs(cells[:, 1] - floor_y) < SAME_FLOOR_M))
     return cells[inside][owner(cells[inside])]
 
 
