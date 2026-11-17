@@ -14,12 +14,15 @@ BASELINE = "spread"
 VLM_FILE = "vlm_qwen3-vl_4b-instruct_list.jsonl"
 
 
-def answers_by_method(out):
-    by_frame = {json.loads(line)["frame"]: json.loads(line)["answer"] for line in (out / VLM_FILE).read_text().splitlines()}
+def answers_by_method(out, vlm_file=VLM_FILE, only=None):
+    """``{method: {room: [answers]}}`` for the rooms whose frames (those of the ``only`` methods, or all) all have an answer."""
+    by_frame = {json.loads(line)["frame"]: json.loads(line)["answer"] for line in (out / vlm_file).read_text().splitlines()}
     methods = {}
     for _, room, entry in selections(out):
-        if all(f in by_frame for f in entry["frames"]):
-            for method, frames in entry["methods"].items():
+        chosen = {m: f for m, f in entry["methods"].items() if only is None or m in only}
+        needed = set(entry["frames"]) if only is None else {f for frames in chosen.values() for f in frames}
+        if needed and all(f in by_frame for f in needed):
+            for method, frames in chosen.items():
                 methods.setdefault(method, {})[room] = [by_frame[f] for f in frames]
     return methods
 

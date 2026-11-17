@@ -116,3 +116,21 @@ def test_a_region_counts_only_once_every_frame_any_method_kept_has_an_answer(tmp
     (tmp_path / "scene" / "selection.json").write_text(json.dumps(selection))
     (tmp_path / VLM_FILE).write_text("".join(json.dumps({"room": r, "frame": f, "answer": "kitchen"}) + "\n" for r, f in (("done", "a"), ("done", "b"), ("half", "c"))))
     assert answers_by_method(tmp_path) == {"floor": {"done": ["kitchen", "kitchen"]}, "random": {"done": ["kitchen"]}}
+
+
+def test_scoring_one_method_needs_answers_only_for_that_methods_frames_and_can_read_another_answer_file(tmp_path):
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.report_mp3d_selection import answers_by_method
+    (tmp_path / "scene").mkdir()
+    selection = {"r": {"frames": {"a": {}, "b": {}}, "methods": {"floor": ["a"], "random": ["b"]}}}
+    (tmp_path / "scene" / "selection.json").write_text(json.dumps(selection))
+    (tmp_path / "other.jsonl").write_text(json.dumps({"room": "r", "frame": "a", "answer": "kitchen"}) + "\n")
+    assert answers_by_method(tmp_path, "other.jsonl", only={"floor"}) == {"floor": {"r": ["kitchen"]}}
+    assert answers_by_method(tmp_path, "other.jsonl") == {}
+
+
+def test_the_vision_pass_names_its_answer_file_by_model_and_prompt_and_can_ask_for_chosen_methods_only(tmp_path):
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_vlm_selected import answer_file, frames_to_ask
+    assert answer_file(tmp_path, "qwen3-vl:8b-instruct", "open").name == "vlm_qwen3-vl_8b-instruct_open.jsonl"
+    entry = {"frames": {"a": {}, "b": {}, "c": {}}, "methods": {"floor": ["a", "b"], "random": ["c"]}}
+    assert sorted(frames_to_ask(entry, None)) == ["a", "b", "c"]
+    assert sorted(frames_to_ask(entry, ["floor"])) == ["a", "b"]

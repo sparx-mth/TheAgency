@@ -60,7 +60,7 @@ def select_scene(scene, rooms, args, protocol, detector):
         poses = [(room_cells[i], yaw) for i in spread_points(room_cells[:, [0, 2]], args.candidates) for yaw in compass_yaws(args.headings)]
         perimeter = box_perimeter(tuple(room["box_xz"]), PERIMETER_SPACING_M) if args.walls else None
         candidates = describe_candidates(poses, render, room_cells, protocol, detector, perimeter)
-        picks = {"walls": select_walls(candidates, FRAMES)} if args.walls else picks_of(candidates, np.random.default_rng([args.seed, zlib.crc32(room["room"].encode())]))
+        picks = {"walls": select_walls(candidates, FRAMES)} if args.walls else {"floor": select(candidates, FRAMES, with_objects=False)} if args.floor_only else picks_of(candidates, np.random.default_rng([args.seed, zlib.crc32(room["room"].encode())]))
         frames = {}
         for index in sorted({i for chosen in picks.values() for i in chosen}):
             c = candidates[index]
@@ -81,17 +81,18 @@ def main(argv=None):
     p.add_argument("--rooms", type=Path, required=True, help="the built Matterport3D regions (regions.json per scene)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--scenes-dir", type=Path, default=Path.home() / "datasets/mp3d/scene_datasets/mp3d")
-    p.add_argument("--detector-url", help="required unless --walls")
+    p.add_argument("--detector-url", help="required unless --walls or --floor-only")
     p.add_argument("--backend", default="yolo_world")
     p.add_argument("--candidates", type=int, default=24)
     p.add_argument("--headings", type=int, default=8)
     p.add_argument("--seed", type=int, default=17)
     p.add_argument("--scenes", nargs="*", help="only these scenes")
     p.add_argument("--walls", action="store_true", help="select by room perimeter hit, without a detector")
+    p.add_argument("--floor-only", action="store_true", help="select by room floor seen only, without a detector")
     p.add_argument("--every", type=int, default=1, help="use every Nth region of each scene")
     args = p.parse_args(argv)
     protocol = protocol_for("v1").with_split("train")
-    detector = None if args.walls else HttpDetector(args.detector_url, [w for w in DEFAULT_VOCABULARY.read_text().strip().split(",") if w], timeout_s=120.0, expected_backend=args.backend)
+    detector = None if args.walls or args.floor_only else HttpDetector(args.detector_url, [w for w in DEFAULT_VOCABULARY.read_text().strip().split(",") if w], timeout_s=120.0, expected_backend=args.backend)
     for folder in sorted(d for d in args.rooms.iterdir() if (d / "regions.json").exists() and (not args.scenes or d.name in args.scenes)):
         if (args.out / folder.name / "selection.json").exists():
             continue

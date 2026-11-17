@@ -6,7 +6,7 @@ import numpy as np
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_eval import first_k_accuracy, paired_difference
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.report_mp3d_rooms import load_truth
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.report_mp3d_selection import KS, answers_by_method
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.report_mp3d_selection import KS, VLM_FILE, answers_by_method
 
 
 def parse(spec):
@@ -19,10 +19,13 @@ def main(argv=None):
     p.add_argument("--rooms", type=Path, required=True)
     p.add_argument("--a", required=True, help="folder:method")
     p.add_argument("--b", required=True, help="folder:method")
+    p.add_argument("--file-a", default=VLM_FILE, help="answer file of A")
+    p.add_argument("--file-b", default=VLM_FILE, help="answer file of B")
     args = p.parse_args(argv)
     truth, rng = load_truth(args.rooms), np.random.default_rng(0)
     (folder_a, method_a), (folder_b, method_b) = parse(args.a), parse(args.b)
-    a, b = answers_by_method(folder_a)[method_a], answers_by_method(folder_b)[method_b]
+    a = answers_by_method(folder_a, args.file_a, {method_a})[method_a]
+    b = answers_by_method(folder_b, args.file_b, {method_b})[method_b]
     shared = {r for r in a if r in b}
     print("%d regions scored by both" % len(shared))
     for k in KS:
