@@ -14,7 +14,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import p
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.build_room_frames import DEPTH_MM_MAX
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import compass_yaws, spread_points
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.review_sheets import FONT, far_fraction, floor_map, pick_frames
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.view_selection import describe_candidates, select
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.view_selection import describe_candidates, sample_names, select
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
 
 SHOWN_PER_SIDE = 6
@@ -63,12 +63,26 @@ def side(folder, cells, room, views, title):
     return np.vstack([banner, top])
 
 
+def all_room_names(views_dir):
+    return [room["room"] for folder in sorted(views_dir.iterdir()) if (folder / "rooms.json").exists() for room in json.loads((folder / "rooms.json").read_text())]
+
+
+def write_dataset(folder, old_folder, rooms, views):
+    """Make the scene folder a room dataset the labelling page reads: ``rooms.json``, ``cells.npz`` and ``views.jsonl`` of the chosen views."""
+    cells = np.load(old_folder / "cells.npz")
+    np.savez_compressed(folder / "cells.npz", cells=cells["cells"], regions=cells["regions"])
+    (folder / "rooms.json").write_text(json.dumps(rooms))
+    (folder / "views.jsonl").write_text("".join(json.dumps(v) + "\n" for v in views))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--scenes-dir", default=os.environ.get("HM3D_SCENES_DIR"))
     p.add_argument("--views", type=Path, required=True, help="the existing room dataset: its rooms.json, cells.npz and old views")
     p.add_argument("--out", type=Path, required=True)
-    p.add_argument("--rooms", nargs="+", required=True)
+    p.add_argument("--rooms", nargs="+", help="room names; or use --sample")
+    p.add_argument("--sample", type=int, help="this many rooms chosen at random from the existing dataset")
+    p.add_argument("--seed", type=int, default=17)
     p.add_argument("--candidates", type=int, default=60)
     p.add_argument("--headings", type=int, default=12)
     p.add_argument("--frames", type=int, default=SHOWN_PER_SIDE)
@@ -79,7 +93,10 @@ def main(argv=None):
     scenes = Path(args.scenes_dir)
     detector = HttpDetector(args.detector_url, [w for w in DEFAULT_VOCABULARY.read_text().strip().split(",") if w], timeout_s=120.0, expected_backend=args.backend) if args.detector_url else None
     (args.out / "sheets").mkdir(parents=True, exist_ok=True)
-    for room_name in args.rooms:
+    names = args.rooms or sample_names(all_room_names(args.views), args.sample, args.seed)
+    print("rooms:", " ".join(names), flush=True)
+    scenes_done = {}
+    for room_name in names:
         old_folder, room = room_in(args.views, room_name)
         scene = room["scene"]
         stem = scene.split("-", 1)[1]
@@ -96,11 +113,16 @@ def main(argv=None):
         new = [write_view(simulator, glb, navmesh, folder, room, i, pose, seen, objects) for i, (pose, seen, objects) in enumerate(picked)]
         simulator.close()
         (folder / ("views_%s.json" % room_name)).write_text(json.dumps(new))
+        entry = scenes_done.setdefault(scene, {"folder": old_folder, "rooms": [], "views": []})
+        entry["rooms"].append(room)
+        entry["views"] += new
         old = pick_frames([json.loads(line) for line in (old_folder / "views.jsonl").read_text().splitlines() if json.loads(line)["room"] == room_name], count=SHOWN_PER_SIDE)
         image = np.vstack([side(old_folder, cells, room, old, "%s before: spots in the room, compass headings" % room_name),
                            side(folder, cells, room, new, "%s after: %d views chosen by room floor seen and objects seen" % (room_name, len(new)))])
         cv2.imwrite(str(args.out / "sheets" / (room_name + ".jpg")), image, [cv2.IMWRITE_JPEG_QUALITY, 90])
         print(room_name, [(cells_, objects_) for _, cells_, objects_ in picked], "cells and objects seen; room has", len(room_cells), "cells", flush=True)
+    for scene, entry in scenes_done.items():
+        write_dataset(args.out / scene, entry["folder"], entry["rooms"], entry["views"])
     return 0
 
 

@@ -18,7 +18,7 @@ PAGE = Path(__file__).with_name("label_app.html")
 
 
 class Rooms:
-    def __init__(self, views, guesses):
+    def __init__(self, views, guesses, selected=False):
         self.views, self.rooms, self.chosen = views, [], {}
         answers = collections.defaultdict(list)
         if guesses:
@@ -32,7 +32,7 @@ class Rooms:
                 view["far_fraction"] = far_fraction(depth)
             for room in json.loads((folder / "rooms.json").read_text()):
                 own = [v for v in frames if v["room"] == room["room"]]
-                shown = pick_frames(own, count=FRAMES_SHOWN)
+                shown = own[:FRAMES_SHOWN] if selected else pick_frames(own, count=FRAMES_SHOWN)
                 mixed = not shown
                 shown = shown or pick_frames(own, count=FRAMES_SHOWN, min_share=0.0, max_far=1.0)
                 self.chosen[room["room"]] = (folder, room, shown)
@@ -92,8 +92,9 @@ def main(argv=None):
     p.add_argument("--guesses", type=Path, help="the room_guess_*.jsonl shown only when the page's guess toggle is on")
     p.add_argument("--labels", type=Path, required=True)
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--selected", action="store_true", help="show each room's views as stored, in order, instead of filtering by annotation")
     args = p.parse_args(argv)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler(Rooms(args.views, args.guesses), LabelStore(args.labels)))
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler(Rooms(args.views, args.guesses, args.selected), LabelStore(args.labels)))
     print("labelling page on http://127.0.0.1:%d" % args.port, flush=True)
     server.serve_forever()
     return 0

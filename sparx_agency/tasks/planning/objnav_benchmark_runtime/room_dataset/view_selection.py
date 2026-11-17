@@ -71,3 +71,10 @@ def select_walls(candidates, count):
         return []
     size = len(candidates[pool[0]]["walls"])
     return [pool[j] for j in greedy_views([candidates[i]["walls"] for i in pool], count, MIN_GAIN, np.full(size, 1 / size), REPEAT_CREDIT)]
+
+
+def sample_names(names, count, seed):
+    """``count`` of the names, chosen at random with ``seed``, in sorted order; all of them when there are fewer."""
+    names = sorted(names)
+    chosen = np.random.default_rng(seed).permutation(len(names))[:count]
+    return [names[i] for i in sorted(int(i) for i in chosen)]

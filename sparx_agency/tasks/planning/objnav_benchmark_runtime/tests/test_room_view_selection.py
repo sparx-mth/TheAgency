@@ -45,3 +45,14 @@ def walled(hit, near=0.0, size=6):
 def test_wall_selection_takes_the_view_that_covers_the_most_perimeter_and_skips_close_ups():
     views = [walled({0, 1, 2, 3}, near=0.9), walled({0, 1}), walled({2, 3, 4})]
     assert select_walls(views, count=2) == [2, 1]
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.view_selection import sample_names
+
+
+def test_the_sample_is_a_sorted_reproducible_subset_of_the_asked_size():
+    names = ["r%02d" % i for i in range(42)]
+    first = sample_names(names, 40, seed=17)
+    assert first == sample_names(names, 40, seed=17) == sorted(first) and len(set(first)) == 40 and set(first) <= set(names)
+    assert first != sample_names(names, 40, seed=18)
+    assert sample_names(names, 99, seed=17) == names
