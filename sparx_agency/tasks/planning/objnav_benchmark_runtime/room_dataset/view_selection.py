@@ -32,13 +32,13 @@ def objects_in_room(detector, rgb, depth, camera, room_cells, protocol):
 def describe_candidates(poses, render, room_cells, protocol, detector, perimeter=None):
     """What each renderable pose sees: ``cells`` (room floor in front, bool per room cell), ``objects`` in the room, ``near`` share of the picture, plus the pose."""
     found = []
-    for cell, yaw in poses:
+    for index, (cell, yaw) in enumerate(poses):
         try:
             rgb, depth, pose = render(cell, yaw)
         except EnvContractError:
             continue
         camera = (*habitat_position(dict(zip("xyz", pose))), yaw)
-        found.append({"cell": cell, "yaw": yaw, "near": near_share(depth, NEAR_M), "far_fraction": far_fraction(depth),
+        found.append({"index": index, "cell": cell, "yaw": yaw, "near": near_share(depth, NEAR_M), "far_fraction": far_fraction(depth),
                       "cells": visible_cells(depth, camera, room_cells, protocol.width, protocol.height, protocol.hfov_deg),
                       "inside": hits_in_room_share(depth, (camera[0], camera[2], yaw), room_cells[:, [0, 2]], protocol.width, protocol.hfov_deg, IN_ROOM_GAP_M),
                       "objects": objects_in_room(detector, rgb, depth, camera, room_cells, protocol) if detector and near_share(depth, NEAR_M) <= MAX_NEAR_SHARE else [],
