@@ -73,3 +73,20 @@ def scene_top1(houses):
 def room_holds(room, target):
     """Whether a room holds the target: by its goal categories when it lists them (HM3D), else by its annotated names (Matterport3D)."""
     return target in room["target_categories"] if "target_categories" in room else present(room["objects"], target)
+
+
+MISSING_LOGPROB = -30.0
+
+
+def yes_no_percent(top_logprobs):
+    """``(percent, logit)`` of a yes/no answer from the first token's top log-probabilities, spelling and case variants pooled; None if neither word is among them."""
+    pooled = {"yes": [], "no": []}
+    for entry in top_logprobs:
+        word = str(entry["token"]).strip().lower()
+        if word in pooled:
+            pooled[word].append(float(entry["logprob"]))
+    if not pooled["yes"] and not pooled["no"]:
+        return None
+    logit = {w: float(np.log(np.sum(np.exp(v)))) if v else MISSING_LOGPROB for w, v in pooled.items()}
+    margin = logit["yes"] - logit["no"]
+    return float(100.0 / (1.0 + np.exp(-margin))), float(margin)

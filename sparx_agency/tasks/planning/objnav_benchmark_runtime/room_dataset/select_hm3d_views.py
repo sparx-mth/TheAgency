@@ -119,12 +119,13 @@ def main(argv=None):
     p.add_argument("--walk-out", type=Path, required=True)
     p.add_argument("--door-out", type=Path, required=True)
     p.add_argument("--scenes", type=int, default=30, help="the first this many train scenes that are not held out")
+    p.add_argument("--offset", type=int, default=0, help="skip this many of the eligible scenes first")
     p.add_argument("--rooms-per-scene", type=int, default=10)
     p.add_argument("--held-out-fraction", type=float, default=0.25)
     p.add_argument("--seed", type=int, default=17)
     args = p.parse_args(argv)
     protocol = protocol_for("v1").with_split("train")
-    names = [d.name for d in sorted((Path(args.scenes_dir) / "hm3d" / "train").iterdir()) if not is_held_out(d.name, args.held_out_fraction)][:args.scenes]
+    names = [d.name for d in sorted((Path(args.scenes_dir) / "hm3d" / "train").iterdir()) if not is_held_out(d.name, args.held_out_fraction)][args.offset:args.offset + args.scenes]
     for scene in names:
         if (args.door_out / scene / "selection.json").exists():
             continue

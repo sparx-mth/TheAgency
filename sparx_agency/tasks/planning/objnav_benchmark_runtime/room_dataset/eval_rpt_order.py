@@ -7,7 +7,7 @@ import numpy as np
 
 from sparx_agency.core.planning.routing.rpt_star import metric_closure
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.hm3d_room_distances import FILE
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_target_score import VLM_FILE, kept_frames
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_target_score import kept_frames, vlm_file
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.report_target_score import read_rows, room_infos, visible_anywhere, vlm_scores
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.rpt_order_eval import adjusted_probability, efficiency, nearest_first, rpt_order, walk_cost
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.target_score import TARGETS, room_holds
@@ -63,12 +63,12 @@ def main(argv=None):
     p.add_argument("--door", type=Path, required=True)
     p.add_argument("--scores", type=Path, required=True)
     p.add_argument("--vlm", default="qwen3-vl:4b-instruct")
+    p.add_argument("--style", default="percent")
     args = p.parse_args(argv)
-    model = args.vlm.replace(":", "_")
     walk_f = {r: f for r, (_, f) in kept_frames(args.walk, 1).items()}
     door0_f = {r: f for r, (_, f) in kept_frames(args.door, 1, ("door0",)).items()}
     door_f = {r: f for r, (_, f) in kept_frames(args.door, 1, ("door0", "door4")).items()}
-    walk_rows, door_rows = read_rows(args.scores / (VLM_FILE % (model, "walk"))), read_rows(args.scores / (VLM_FILE % (model, "door")))
+    walk_rows, door_rows = read_rows(args.scores / vlm_file(args.vlm, "walk", args.style)), read_rows(args.scores / vlm_file(args.vlm, "door", args.style))
     scores = {"vlm_walk": vlm_scores(walk_rows, walk_f), "vlm_door": vlm_scores(door_rows, door_f), "vlm_door0": vlm_scores(door_rows, door0_f)}
     info = {r["room"]: r for r in room_infos(args.rooms)}
     distances = json.loads((args.rooms / FILE).read_text())
@@ -108,7 +108,7 @@ def main(argv=None):
                 name, sum(len(v) for v in by_scene.values()), np.mean([t[0] for s in scenes for t in by_scene[s]]), np.mean([t[1] for s in scenes for t in by_scene[s]]), *eff, *diff))
         lines.append("")
     text = "\n".join(lines)
-    (args.scores / "report_rpt_order.md").write_text(text)
+    (args.scores / ("report_rpt_order%s.md" % ("" if args.style == "percent" else "_" + args.style))).write_text(text)
     print(text)
     return 0
 

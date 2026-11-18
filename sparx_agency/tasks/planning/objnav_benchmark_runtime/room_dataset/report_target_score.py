@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_target_score import TEXT_FILE, VLM_FILE, kept_frames
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_target_score import TEXT_FILE, kept_frames, vlm_file
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.target_score import TARGETS, auroc, auroc_difference, parse_percent, room_holds, room_score, scene_top1
 
 
@@ -54,11 +54,14 @@ def table(title, rooms, scores, info, hidden, rng):
     versus = "text_yolo" in scores
     lines = ["### " + title, "", "| target | rooms | holding | " + " | ".join(scores) + (" | vlm_walk minus text(yolo) |" if versus else " |"), "|---|---|---|" + "---|" * (len(scores) + versus)]
     tops = {m: [] for m in scores}
+    aurocs = {m: [] for m in scores}
     for target in TARGETS:
         keys = [(room, target) for room in rooms if (room, target) in hidden and all(scores[m].get((room, target)) is not None for m in scores)]
         labels = [room_holds(info[room], target) for room, _ in keys]
         values = {m: [scores[m][k] for k in keys] for m in scores}
         row = [auroc(values[m], labels) for m in scores]
+        for m, a in zip(scores, row):
+            aurocs[m].append(a)
         diff = auroc_difference(values["vlm_walk"], values["text_yolo"], labels, rng) if versus and 0 < sum(labels) < len(labels) else (float("nan"),) * 3
         lines.append("| %s | %d | %d | %s%s |" % (target, len(keys), sum(labels), " | ".join("%.2f" % a for a in row), (" | %+.2f [%+.2f, %+.2f]" % diff) if versus else ""))
         for m in scores:
@@ -67,7 +70,7 @@ def table(title, rooms, scores, info, hidden, rng):
                 houses.setdefault(info[room]["scene"], []).append((s, lab))
             tops[m].append(scene_top1(houses))
     lines += ["", "top-scored room of a house holds the target (mean over targets): " + ", ".join("%s %.0f%%" % (m, 100 * np.nanmean(t)) for m, t in tops.items()), ""]
-    return lines
+    return lines, {m: float(np.nanmean(a)) for m, a in aurocs.items()}
 
 
 def main(argv=None):
@@ -78,15 +81,15 @@ def main(argv=None):
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--every", type=int, default=4)
     p.add_argument("--vlm", default="qwen3-vl:4b-instruct")
+    p.add_argument("--style", default="percent")
     p.add_argument("--text", default="qwen2.5:14b-instruct")
     args = p.parse_args(argv)
-    model = args.vlm.replace(":", "_")
     walk_frames = {r: f for r, (_, f) in kept_frames(args.walk, args.every).items()}
     door0 = {r: f for r, (_, f) in kept_frames(args.door, 1, ("door0",)).items()}
     door = {r: f for r, (_, f) in kept_frames(args.door, 1, ("door0", "door4")).items()}
     rooms = sorted(set(walk_frames) & set(door))
     info = {r["room"]: r for r in room_infos(args.rooms)}
-    walk_rows, door_rows = read_rows(args.out / (VLM_FILE % (model, "walk"))), read_rows(args.out / (VLM_FILE % (model, "door")))
+    walk_rows, door_rows = read_rows(args.out / vlm_file(args.vlm, "walk", args.style)), read_rows(args.out / vlm_file(args.vlm, "door", args.style))
     scores = {"vlm_walk": vlm_scores(walk_rows, walk_frames), "vlm_door0": vlm_scores(door_rows, door0), "vlm_door": vlm_scores(door_rows, door)}
     text_rows = read_rows(args.out / (TEXT_FILE % (args.text.replace(":", "_"), "yolo_world")))
     if text_rows:
@@ -97,10 +100,12 @@ def main(argv=None):
     unseen = {(r, t): True for r in rooms for t in TARGETS if not seen.get((r, t), True)}
     rng = np.random.default_rng(0)
     lines = ["# Target-in-room score, %d rooms with walk and door views\n" % len(rooms)]
-    lines += table("All rooms", rooms, scores, info, everything, rng)
-    lines += table("Rooms where the target is in view of no door or kept walk frame (the prior)", rooms, scores, info, unseen, rng)
-    text = "\n".join(lines)
-    (args.out / "report_target_score.md").write_text(text)
+    shown, _ = table("All rooms", rooms, scores, info, everything, rng)
+    hidden, prior_auroc = table("Rooms where the target is in view of no door or kept walk frame (the prior)", rooms, scores, info, unseen, rng)
+    text = "\n".join(lines + shown + hidden)
+    suffix = "" if args.style == "percent" else "_" + args.style
+    (args.out / ("report_target_score%s.md" % suffix)).write_text(text)
+    (args.out / ("report_target_score%s.json" % suffix)).write_text(json.dumps({"style": args.style, "prior_mean_auroc": prior_auroc}))
     print(text)
     return 0
 

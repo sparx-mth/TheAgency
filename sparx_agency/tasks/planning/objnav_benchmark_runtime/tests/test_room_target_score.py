@@ -57,3 +57,27 @@ def test_the_difference_interval_covers_zero_for_two_equal_rankings():
     labels = [bool(i % 2) for i in range(60)]
     mean, low, high = auroc_difference(scores, scores, labels, rng)
     assert mean == 0.0 and low == 0.0 and high == 0.0
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.target_score import yes_no_percent
+
+
+def test_a_yes_that_is_much_likelier_than_no_gives_a_high_percent_and_a_positive_logit():
+    percent, logit = yes_no_percent([{"token": "yes", "logprob": -0.01}, {"token": "no", "logprob": -4.6}])
+    assert percent > 98 and logit > 4
+
+
+def test_spelling_and_case_variants_of_the_answer_are_pooled():
+    low = yes_no_percent([{"token": "No", "logprob": -0.1}, {"token": " no", "logprob": -3.0}, {"token": "yes", "logprob": -5.0}])
+    assert low[0] < 2 and low[1] < 0
+
+
+def test_equal_chances_give_fifty_percent():
+    percent, logit = yes_no_percent([{"token": "yes", "logprob": -0.69}, {"token": "no", "logprob": -0.69}])
+    assert abs(percent - 50.0) < 1e-6 and abs(logit) < 1e-9
+
+
+def test_a_missing_answer_is_treated_as_very_unlikely_and_no_answer_at_all_has_no_score():
+    assert yes_no_percent([{"token": "yes", "logprob": -0.2}])[1] > 20
+    assert yes_no_percent([{"token": "maybe", "logprob": -0.2}]) is None
+    assert yes_no_percent([]) is None
