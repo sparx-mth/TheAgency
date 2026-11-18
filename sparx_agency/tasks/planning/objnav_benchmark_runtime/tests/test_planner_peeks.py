@@ -47,3 +47,23 @@ def test_a_pose_belongs_to_the_nearest_floor_cell_region_on_its_floor():
 def test_a_pose_far_from_every_cell_belongs_to_no_region():
     cells = np.array([[0.0, 0.0, 0.0]])
     assert region_at((9.0, 0.0, 9.0), cells, np.array([1])) is None
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.planner_peeks import pose_visits
+
+
+def test_a_room_is_visited_at_the_first_run_of_steps_inside_it():
+    regions = [None, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1]
+    assert pose_visits(regions, min_steps=3) == {1: (1, 4), 2: (5, 7)}
+
+
+def test_a_run_shorter_than_the_minimum_is_a_pass_through_and_not_a_visit():
+    assert pose_visits([1, 1, 2, 1, 1, 1], min_steps=3) == {1: (3, 5)}
+
+
+def test_a_room_left_and_entered_again_keeps_its_first_visit_only():
+    assert pose_visits([1, 1, 1, None, 1, 1, 1], min_steps=3) == {1: (0, 2)}
+
+
+def test_no_steps_in_any_region_gives_no_visits():
+    assert pose_visits([None, None, None], min_steps=3) == {}

@@ -12,7 +12,7 @@ import numpy as np
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import protocol_for
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.geometry import habitat_position
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.review_recording import events_command, load_steps
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.planner_peeks import parse_events, peek_steps, region_at, visit_intervals
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.planner_peeks import parse_events, peek_steps, pose_visits, region_at, visit_intervals
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.select_door_views import visible_targets
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.select_hm3d_views import Hm3dScene
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.view_selection import describe_candidates
@@ -20,6 +20,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.walk_view
 
 KEPT = 3
 MAX_PITCH_RAD = 0.05
+MIN_STEPS_INSIDE = 3
 
 
 def trajectory(directory):
@@ -36,12 +37,15 @@ def render_pose(scene, position, yaw):
     return rgb, depth, (*pose, yaw)
 
 
-def first_visits(directory, scene, rooms):
-    """``{GT room name: (arrival, end)}`` for the first planner visit to each sampled room, by the room its arrival pose lies in."""
-    rows, lines = load_steps(directory), []
-    events_command(rows, lines.append)
+def first_visits(directory, scene, rooms, by="poses"):
+    """``{GT room name: (arrival, end)}`` for the first planner visit to each sampled room: the first stretch of steps spent inside its floor region (``poses``), or the planner's own ``arrive`` events (``events``)."""
     steps = trajectory(directory)
     by_region = {r["region"]: r["room"] for r in rooms}
+    if by == "poses":
+        regions = [region_at(habitat_pose(row)[0], scene.cells, scene.regions) for row in steps]
+        return {by_region[region]: span for region, span in pose_visits(regions, MIN_STEPS_INSIDE).items() if region in by_region}
+    rows, lines = load_steps(directory), []
+    events_command(rows, lines.append)
     found = {}
     for _, arrival, end in visit_intervals(parse_events("\n".join(lines)), last_step=len(steps) - 1):
         region = region_at(habitat_pose(steps[arrival])[0], scene.cells, scene.regions)
@@ -80,6 +84,7 @@ def main(argv=None):
     p.add_argument("--door-out", type=Path, required=True)
     p.add_argument("--scenes-dir", default=os.environ.get("HM3D_SCENES_DIR"))
     p.add_argument("--seed", type=int, default=17)
+    p.add_argument("--visits", choices=("poses", "events"), default="poses", help="find room visits from the poses, or from the planner's arrive events")
     args = p.parse_args(argv)
     protocol = protocol_for("v1").with_split("train")
     for scene_dir in sorted(d for d in args.batch.iterdir() if (d / "recordings").is_dir()):
@@ -97,7 +102,7 @@ def main(argv=None):
             walk_result, door_result = {}, {}
             for recording in sorted((scene_dir / "recordings").iterdir()):
                 steps = trajectory(recording)
-                for room_name, (arrival, end) in first_visits(recording, scene, rooms).items():
+                for room_name, (arrival, end) in first_visits(recording, scene, rooms, args.visits).items():
                     if room_name not in walk_result:
                         walk_result[room_name], door_result[room_name] = peeks_of_room(scene, by_name[room_name], steps, arrival, end, protocol, folders)
             scene.close()

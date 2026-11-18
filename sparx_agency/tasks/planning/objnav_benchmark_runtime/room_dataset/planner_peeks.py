@@ -53,3 +53,15 @@ def region_at(position, cells, regions):
     gap = np.hypot(cells[near, 0] - position[0], cells[near, 2] - position[2])
     best = int(np.argmin(gap))
     return int(np.asarray(regions)[near][best]) if gap[best] <= MAX_REGION_GAP_M else None
+
+
+def pose_visits(region_by_step, min_steps):
+    """``{region: (first step, last step)}`` of the first run of at least ``min_steps`` consecutive steps spent inside each region; shorter runs are passing through."""
+    visits, start = {}, 0
+    for step in range(1, len(region_by_step) + 1):
+        if step == len(region_by_step) or region_by_step[step] != region_by_step[start]:
+            region = region_by_step[start]
+            if region is not None and region not in visits and step - start >= min_steps:
+                visits[region] = (start, step - 1)
+            start = step
+    return visits
