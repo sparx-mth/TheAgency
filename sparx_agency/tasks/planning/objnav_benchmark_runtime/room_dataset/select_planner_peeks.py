@@ -14,6 +14,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.object_dataset.geometr
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.review_recording import events_command, load_steps
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.planner_peeks import parse_events, peek_steps, pose_visits, region_at, visit_intervals
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.select_door_views import visible_targets
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.select_grid_views import MIN_ROOM_CELLS
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.select_hm3d_views import Hm3dScene
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.view_selection import describe_candidates
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.walk_views import keep_best
@@ -56,10 +57,13 @@ def first_visits(directory, scene, rooms, by="poses"):
 
 def peeks_of_room(scene, room, steps, arrival, end, protocol, folders):
     walk_folder, door_folder = folders
+    room_cells = scene.room_cells(room)
+    if len(room_cells) < MIN_ROOM_CELLS:
+        return None
     inside_step, window = peek_steps(arrival, end)[1], peek_steps(arrival, end)[2]
     level = [s for s in window if abs(steps[s]["camera_pitch"]) <= MAX_PITCH_RAD]
     poses = [habitat_pose(steps[s]) for s in level]
-    frames = describe_candidates(poses, scene.render, scene.room_cells(room), protocol, None)
+    frames = describe_candidates(poses, scene.render, room_cells, protocol, None)
     kept = [level[frames[i]["index"]] for i in keep_best(frames, KEPT)]
     names, visible = {}, {}
     for step in sorted({arrival, inside_step, *kept}):
@@ -103,8 +107,9 @@ def main(argv=None):
             for recording in sorted((scene_dir / "recordings").iterdir()):
                 steps = trajectory(recording)
                 for room_name, (arrival, end) in first_visits(recording, scene, rooms, args.visits).items():
-                    if room_name not in walk_result:
-                        walk_result[room_name], door_result[room_name] = peeks_of_room(scene, by_name[room_name], steps, arrival, end, protocol, folders)
+                    peeks = peeks_of_room(scene, by_name[room_name], steps, arrival, end, protocol, folders) if room_name not in walk_result else None
+                    if peeks is not None:
+                        walk_result[room_name], door_result[room_name] = peeks
             scene.close()
             (args.walk_out / name / "selection.json").write_text(json.dumps(walk_result))
             (args.door_out / name / "selection.json").write_text(json.dumps(door_result))
