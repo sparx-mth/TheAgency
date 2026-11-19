@@ -1,0 +1,194 @@
+{
+  "agent": "sparx-rpt-llm-host-sweep",
+  "by_scene": [
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00800-TEEsavR23oF",
+      "soft_spl": 0.40061945092077195,
+      "spl": 0.3967522891237467,
+      "success_rate": 0.7070707070707071
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00802-wcojb4TFT35",
+      "soft_spl": 0.4366278246911432,
+      "spl": 0.4183530930958647,
+      "success_rate": 0.7474747474747475
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00813-svBbv1Pavdk",
+      "soft_spl": 0.5438517002072342,
+      "spl": 0.5474142189599293,
+      "success_rate": 0.9797979797979798
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00814-p53SfW6mjZe",
+      "soft_spl": 0.27344082378890017,
+      "spl": 0.25384334085623533,
+      "success_rate": 0.45454545454545453
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00820-mL8ThkuaVTM",
+      "soft_spl": 0.17749128393231797,
+      "spl": 0.16088676382489084,
+      "success_rate": 0.3939393939393939
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00824-Dd4bFSTQ8gi",
+      "soft_spl": 0.504843997295037,
+      "spl": 0.500856187473312,
+      "success_rate": 0.9292929292929293
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00829-QaLdnwvtxbs",
+      "soft_spl": 0.5555284309406769,
+      "spl": 0.5597279717985586,
+      "success_rate": 1.0
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00832-qyAac8rV8Zk",
+      "soft_spl": 0.2688156045005016,
+      "spl": 0.26129825496931924,
+      "success_rate": 0.5151515151515151
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00835-q3zU7Yy5E5s",
+      "soft_spl": 0.3645766001688246,
+      "spl": 0.35705545375439024,
+      "success_rate": 0.6060606060606061
+    },
+    {
+      "episodes": 119,
+      "finished": true,
+      "scene": "00839-zt1RVoi7PcG",
+      "soft_spl": 0.4760956142480782,
+      "spl": 0.46590875677038873,
+      "success_rate": 0.7983193277310925
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00843-DYehNKdT76V",
+      "soft_spl": 0.40371859699913754,
+      "spl": 0.39989007553271966,
+      "success_rate": 0.7575757575757576
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00848-ziup5kvtCCR",
+      "soft_spl": 0.4207914610958185,
+      "spl": 0.4150761547131738,
+      "success_rate": 0.8282828282828283
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00853-5cdEh9F2hJL",
+      "soft_spl": 0.42802998754268284,
+      "spl": 0.4164376143335636,
+      "success_rate": 0.8888888888888888
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00873-bxsVRursffK",
+      "soft_spl": 0.3608330939541493,
+      "spl": 0.35911709065749925,
+      "success_rate": 0.7070707070707071
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00876-mv2HUxq3B53",
+      "soft_spl": 0.5039355435665461,
+      "spl": 0.49721915118356097,
+      "success_rate": 0.8686868686868687
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00877-4ok3usBNeis",
+      "soft_spl": 0.47185276427716105,
+      "spl": 0.4712433524603294,
+      "success_rate": 0.8383838383838383
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00878-XB4GS9ShBRE",
+      "soft_spl": 0.22389320178558628,
+      "spl": 0.21240761775969907,
+      "success_rate": 0.42424242424242425
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00880-Nfvxx8J5NCo",
+      "soft_spl": 0.45814320463802793,
+      "spl": 0.4511110973050567,
+      "success_rate": 0.8787878787878788
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00890-6s7QHgap2fW",
+      "soft_spl": 0.2508063425145286,
+      "spl": 0.19080667579207872,
+      "success_rate": 0.3333333333333333
+    },
+    {
+      "episodes": 99,
+      "finished": true,
+      "scene": "00891-cvZr5TUy5C5",
+      "soft_spl": 0.3027640469255905,
+      "spl": 0.28656417604184903,
+      "success_rate": 0.5757575757575758
+    }
+  ],
+  "complete": true,
+  "dataset_version": "v1",
+  "episodes": 2000,
+  "episodes_published": 2000,
+  "overall": {
+    "distance_to_goal_m": 3.214360210985673,
+    "key": "all",
+    "mean_path_length_m": 25.041871752153508,
+    "mean_steps": 253.217,
+    "n_episodes": 2000,
+    "n_unreachable_end": 0,
+    "soft_spl": 0.39218060505512015,
+    "spl": 0.38194656971980906,
+    "spl_ci": [
+      0.3679001294051903,
+      0.3964517544354363
+    ],
+    "success_rate": 0.7125,
+    "success_rate_ci": [
+      0.6922719032880766,
+      0.7319133516173908
+    ]
+  },
+  "scenes_expected": 20,
+  "scenes_published": 20,
+  "scenes_unfinished": [],
+  "scenes_with_rows": 20,
+  "scenes_without_rows": [],
+  "split": "val"
+}
