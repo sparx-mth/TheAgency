@@ -104,6 +104,8 @@ a resolution limit. Design to test on the 4090: ask the VLM about a zoomed crop 
 - 4090 plan: (0) pull, services on CUDA, rerun 3-4 episodes to check the local baseline; (1) offline sweep of all 1,616 train-sweep bboxes with 4B and 8B; (2) new in-loop check before STOP (TDD, flag off by default, category name only);
   (3) paired runs: the 12 wrong-stop episodes first, then the 70 train episodes, then 100-150 new ones; SR and SPL paired with CIs, vetoes per episode, plants separately. Pre-set criteria: at most one correct STOP blocked, at least half of the wrong STOPs rejected, no negative SR difference.
 
+See also `todos/objnav-4090-room-score-handoff.md` for the VLM room-score and frame-selection line (scripts in `analysis_tools/room_score/`).
+
 ## Todos, in order
 1. **Baseline on train, single-floor only** (phase A): SR, SPL, then failure triage with GT as in `todos/` session: wrong stop vs timeout; for wrong stops,
    is a same-kind object within 3 m, is it in the goal set (`goals_by_category` object ids), is it the goal but farther than the success radius.
