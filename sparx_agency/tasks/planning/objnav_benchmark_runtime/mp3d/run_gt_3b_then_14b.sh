@@ -194,7 +194,7 @@ check_source() {
   git merge-base --is-ancestor "$REQUIRED_COMMIT" HEAD || die "HEAD $(git rev-parse --short HEAD) does not contain $REQUIRED_COMMIT"
   say "check: $BRANCH at $(git rev-parse HEAD) contains $REQUIRED_COMMIT; tracked tree $(if [[ -z "$(git status --porcelain --untracked-files=no)" ]]; then echo clean; else echo "MODIFIED: $(git status --porcelain --untracked-files=no | tr '\n' ' ') (recorded in each run's source-changes.diff)"; fi)"
   local digest
-  digest="$("$PY" -c '
+  digest="$("$HAB_PY" -c '
 import sys
 from sparx_agency.core.mapping.topology.search_node_prompts import DEFAULT_PROMPT, PROMPTS
 p = PROMPTS[sys.argv[1]]
