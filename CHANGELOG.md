@@ -5,6 +5,81 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Changed (2026-11-18, the paper's draft cut to a submission draft: `docs/paper/zson_paper.tex`)
+- **From an audit of the code to a paper** (34 -> 28 pages, pseudocode and figure included; pdfLaTeX of TeX Live 2026:
+  no error, no warning, no over- or underfull box; every reference cited). The 32 `\TODO` notes are gone, with the
+  placeholder macros. Removed: the section "Which code produced the numbers" (360 lines), the development-history
+  remarks inside the Method ("earlier revisions ...", the "located sides" paragraph), the implementation map and the
+  run-records appendix. What they said about the reported runs is now an asterisk on the numbers (`\oldrev`), one
+  footnote in the abstract and a short subsection "Checks of the current code" (6.3) that keeps the stop-criterion
+  table.
+- **The numbers are still the two 14B full-split runs, marked**: HM3D SR 71.0 / SPL 39.8, MP3D SR 65.6 / SPL 29.1
+  (entries 047, 049), start-storey SR 83.5 / 77.4. Section 6.3 names what changed since and what was checked: closing
+  on 180 MP3D episodes (77.8 -> 78.9 % without the navmesh query, 78.9 -> 82.2 % with the stop criterion), the last
+  prompt revision on 90 HM3D episodes (86.7 -> 87.8 %), the smoke of 2026-11-17 end to end (16 of 20 against 15) --
+  and that the removal of the priors table and of the prescriptive prompt was not measured in isolation.
+- **Method statements corrected against the code** (each read in the module): a refused step does NOT end the steps
+  toward a depth-less candidate (the withdrawn fix was still described; up to 24 such steps are outside the 12-action
+  budget); a landmark is retracted after `max(4, observations)` clear misses; a doorway needs three observations and
+  one view 0.2 m or 20 degrees from the first, and is not used "only" for the partition (scrape guard, exits, room
+  facts); the door cut goes to the NARROWEST choke; thresholds are also read off sight lines to exits; floor glimpsed
+  beyond a forced cut is a room from four cells; a query is deferred while a node is in force; on timeout RPT* returns
+  its incumbent, and a triangle-inequality violation falls to the random draw; a lattice step costs the cost map's
+  cells, a turn one unit; routes are simplified (Douglas-Peucker), not string-pulled; a refused step is a lattice
+  pose AND a map write unless a scrape, and a scrape needs a confirmed doorway within 40 degrees of its axis;
+  finished-room tests (c) and (d); which STOPs are taken without a fresh box; the walk's end conditions; what a
+  release remembers; the stair-start switch after 220 actions; the 0.45 m line for crossed cells; adopted split
+  levels; depth out of range is discarded, not clipped.
+- **Filled from the records instead of deleted**: RPT* proven optimal in 99.3 % of the 8,657 solver calls of the HM3D
+  run (the other 0.7 % violated the triangle inequality; at most 11 ms and 11 nodes); the adapter's start-to-goal
+  geodesic distances within 1 mm of the published ones on all MP3D and 1,992 of 2,000 HM3D episodes; HM3D SoftSPL by
+  storey 48.1 / 7.5, and overall 41.0 (41.1 was a double rounding of 0.41045).
+- **Related work and references**: four systems that also plan a visiting sequence are cited beside the novelty
+  claim (WTRP-Searcher, BeliefMapNav, SSMG-Nav, SEEK); Gong et al. is the RA-L 2026 article (title and authors
+  changed), RPT* the T-RO early-access article, InstructNav PMLR 270 (2025). Entries checked against Crossref, arXiv,
+  PMLR and OpenReview.
+- **Pseudocode and figure.** `algorithm2e` is replaced by `algorithm` + `algpseudocode`, in the style of the example
+  the paper's owner gave: numbered lines, procedure calls in small capitals, short comments at the right, `end`
+  lines shown. Algorithm 1 is the episode loop (per step, as `RPTSearchPolicy._plan` / `_search` and
+  `RoomSearchLoop.plan` decide it), Algorithm 2 `UpdateSceneGraph` (map, landmarks, doorways, rooms), Algorithm 3
+  `RoomProbabilities` (the reply's checks and the adjustment by exploration state, which replace two paragraphs and
+  Eq. 3) and Algorithm 4 `TargetClosing`. A*, RPT*, the watershed, the detector and the LLM are single calls;
+  Algorithm 1's caption names the rules it leaves out. The overview figure is redrawn in TikZ: perception and map,
+  room scene graph, the two LLM queries, RPT*, node visit, target closing, route planning and execution, with the
+  two feedback loops. The target category is `c*` (`c(u,v)` is the cost) and the actions spent inside a room are
+  `n_v` (`tau_v` is the search time of Eq. 2).
+- **The pseudocode was read line by line against the code** and corrected where it differed: room labels and
+  probabilities are asked under one condition (not after an unreachable release); the candidates are the rooms not
+  finished or re-offered; a transit ends on arrival, not on standing inside the room; the exits are read by the loop
+  after the warm-up, not by the graph update; the rooms are rebuilt on fewer actions only during a committed walk.
+  In the closing: the lock and the verification's release are tested before the verify action; a candidate out of
+  view for 6 sweep actions is released; the inspection begins only if no fresh box reads farther; the STOP on a
+  fresh box needs it aligned (centred, or tracked over the approach); an inspection that tried every view without a
+  box releases. Two rules that end an episode outside the closing are now stated: the walk to a target landmark on
+  which no takeover started (STOP within 0.75 m after three separated views; 1 of 1,345 STOPs and 40 of the first
+  1,810 episodes of the 3B run in progress) and the stair walk's halt after a failed retreat (4 episodes there).
+- **After a review of the revision**: the footnote claims "a similar success rate", not comparable results; "earlier
+  revisions" (the two runs used different ones); the 90-episode check is said to compare two revisions that both
+  lacked the priors and the prescriptive prompt; the old prompt and priors table are described as they were; the
+  0.8 m stair-start band is listed among the looks at validation data; the labeller prompt's hand-written hints are
+  listed as hand-designed; the launcher, not the library, defaults to the 3B.
+- Open for the authors: the method's name (`\ours`, still the working name LGOS), the author block (`Anonymous
+  Authors`) and acknowledgements. `sync_prompts.py --check` passes; its docstring names Appendix B.
+### Added (2026-11-17, the 3B-then-14B HM3D v1 GT comparison as one resumable command -- hm3d/README.md section 3.6)
+- **`hm3d/run_gt_3b_then_14b.sh`**: two full ground-truth runs of the v1 val split in sequence, `qwen2.5:3b-instruct` then
+  `qwen2.5:14b-instruct` in both LLM roles under the same prompt version `facts-qwen2.5-3b-v1`; checks the branch and
+  commit, the models in Ollama (pulls them), the preflight's prompt digest and roles, the services and the first
+  `run.json`; resumes by re-run; fixed parallelism (20 workers / 10 slots, 8 / 4) instead of `--jobs max`; and after each
+  stage writes, commits and pushes `hm3d/results/<run name>/` (never force; a failed push is logged and the next stage runs).
+- **`hm3d/results_summary.py`** and the `hm3d/results/` convention (as `gibson/results/`): SR and SPL overall and per
+  category with intervals, episodes, the LLM per role, the prompt version and digest and whether it was tuned on the model
+  that answered, the source commit and tree state, perception, start and end times; `episodes.csv`, `run.json`,
+  `campaign_summary.json` beside it.
+- **`hm3d.run --record-log-only`** and `hm3d/run_benchmark.sh --record-log-only`, MP3D's flag ported: every episode's
+  `steps.jsonl`, `trajectory.csv` and map journal, no video and no FFmpeg (~9 MB an episode on HM3D).
+- Smoke of 2026-11-17 (one episode per scene per stage, committed as `hm3d/results/hm3d_v1_gt_3b_vs_14b_smoke_*`): the 3B
+  at 20 workers takes VRAM 81 %, CPU up to 63 %, RAM 37 %, its oracle calls 25 s each (Ollama's one sampling thread shared
+  by 20 workers); the 14B at 9 workers reached 91 % of VRAM, so the full run uses 8.
 ### Changed (2026-11-16, evening: the STOP is taken inside each benchmark's own success zone; the blind-step fix and the 0.20 m retry clearance are withdrawn; the launcher's oracle model is the 3B)
 
 Five items asked for after the day's first check (the entry below, which this one revises): bring back the

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Copy the method's two LLM prompts from the code into ``zson_paper.tex``, verbatim.
 
-Appendix C of the paper must show the prompts the method actually sends, so
+Appendix B of the paper must show the prompts the method actually sends, so
 they are never typed into the paper by hand. This script imports them from the
 code and rewrites the regions of the ``.tex`` file between
 ``%%PROMPT-BEGIN:<name>%%`` and ``%%PROMPT-END:<name>%%``.
