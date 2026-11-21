@@ -27,17 +27,30 @@ still a node but has no type; option B: no rooms at all, clusters of frontiers s
 - `score_frames_target.py` asks A and B about the episode's target only (1.1 s/frame on the 3070); `score_frames_six.py` asks all six objects for A and B (6.4 s/frame); `chain_six.sh` queues it. `eval_selectors.py` compares frame
   selection rules (random, even, floor, room share, objects, diverse, VLM sum) at K=1/3/5, three aggregations (mean, max, noisy-OR), AUROC per target, all rooms and rooms where the detector saw the target in no frame.
 
-## Results so far (prompt 1, six objects, Qwen3-VL-2B, laptop data)
-- Per target, mean score over a room's frames, AUROC all rooms / target not seen by the detector (present/absent counts): chair 0.76 / 0.62 (46/85), bed 0.85 / 0.70 (6/116), potted plant 0.71 / 0.58 (19/137),
-  toilet 0.91 / n/a (2/159), tv 0.73 / 0.64 (23/106), couch 0.78 / 0.45 (10/112). Mean score when present vs absent: bed 0.53 vs 0.10, toilet 0.62 vs 0.09, chair 0.55 vs 0.22.
-- Frame selection hardly matters: mean AUROC over targets with enough positives, target not seen: random 0.599, even 0.601, floor 0.622, room share 0.629, diverse 0.619, objects 0.555, VLM sum 0.590 at K=3; all frames 0.598.
-  Aggregation mean/max/noisy-OR are equal (0.620-0.622). On the 63 buffers with 8 or more frames only 3 targets qualify and the numbers are noise. The score itself (about 0.6 when the target is out of view) is the limit, which matches the office
-  result (AUROC 0.57-0.73, RPT* ordering gain only when the target is seen, not replicated on 20 fresh scenes).
-- Pending on the laptop when this was written: prompts A and B for the episode target, then for all six objects, then the 4B model with CPU offload (`device_map='auto'`, `max_memory`). Outputs: `~/tc_sweep/vlm_frame_target_{A,B}.jsonl`,
-  `~/tc_sweep/vlm_frame_six_{2b,4b}_{A,B}.jsonl`. An archive with these and the frames will be in `~/Downloads/objnav_room_score_*.tar.gz` (frames are 13.5 MB, not in git).
+## Results (laptop, all train, Qwen3-VL 2B and 4B, 191 room visits; `analysis_tools/room_score/eval_prompts.py` reproduces every table from `data/`)
+**Correction of an earlier reading:** on the episode target only, prompt B (search direction) looked best out of view (AUROC 0.82 against 0.63), but that subset has only 8 positive rooms. With six objects per frame (many more labelled pairs)
+it does not hold: B is not better and A is not better than the plain prompt. Do not report "B is better".
+
+Episode target only (one question per frame, what the agent would ask); AUROC with scene-bootstrap 95% interval:
+
+| model and prompt | all rooms (30 hold the target) | target not seen by the detector (8 hold it) |
+|---|---|---|
+| 2B old ("is there X in this room") | 0.845 [0.74, 0.94] | 0.632 [0.47, 0.77] |
+| 2B A (prior, "would you find X") | 0.856 [0.76, 0.94] | 0.731 [0.54, 0.85] |
+| 2B B (is it worth searching there) | 0.872 [0.77, 0.94] | 0.818 [0.55, 0.95] |
+| 4B A | 0.723 [0.54, 0.88] | 0.433 [0.13, 0.59] |
+| 4B B | 0.767 [0.65, 0.88] | 0.547 [0.31, 0.74] |
+
+Six objects per frame (2B), mean AUROC over targets with at least 4 positives: all rooms old 0.790, A 0.758, B 0.709; target not seen old 0.598, A 0.582, B 0.565 (A minus old -0.024 [-0.108, +0.036], B minus old
+-0.040 [-0.176, +0.080]). B is near chance for tv (0.487). Per target (old prompt, all rooms): toilet 0.91, bed 0.85, couch 0.78, chair 0.76, tv 0.73, plant 0.71; not seen: chair 0.62, bed 0.70, plant 0.58, tv 0.64, couch 0.45.
+- Frame selection hardly matters (old prompt, K=3, not seen): random 0.599, even 0.601, floor 0.622, room share 0.629, diverse 0.619, objects 0.555, VLM sum 0.590; all frames 0.598; mean/max/noisy-OR equal (0.620-0.622).
+- Reading: the score separates rooms that show the object, and hardly separates rooms where it is out of view (about 0.6 for every prompt, model size and selection rule tried). The 4B model with partial CPU offload (`device_map='auto'`) was not better than 2B.
+  This matches the office result (AUROC 0.57-0.73, RPT* ordering gain only where the target is seen, not replicated on fresh scenes). Limits: 320x240 JPEGs every 5th call, median 5 frames per buffer, few positives (8 out of view for the episode target).
+- Files: `data/vlm_frame_logprob.jsonl` (six objects, prompt 1), `data/vlm_frame_six_2b_{A,B}.jsonl`, `data/vlm_frame_target_{A,B}.jsonl` (2B, episode target), `data/vlm_frame_target4b_{A,B}.jsonl`, `data/buffers.json`. The 1,336 frames (13.5 MB) are not in git:
+  archive `objnav_room_score_2026-11-21.tar.gz` (OneDrive).
 
 ## Plan for the 4090
-0. Pull, CUDA env, download Qwen3-VL-2B/4B/8B-Instruct from HuggingFace, copy the laptop archive, run `eval_selectors.py` on the laptop scores to reproduce the tables above.
+0. Pull, CUDA env, download Qwen3-VL-2B/4B/8B-Instruct from HuggingFace, copy the laptop archive, run `eval_selectors.py` and `eval_prompts.py` on the laptop scores to reproduce the tables above.
 1. New data: 100-150 seeded single-floor train episodes in scenes not used for design, **balanced across the six target categories**, with **dense full-resolution frames** (640x480, every call or every other call). This needs a small
    change in `trace_tools/trace_run.py` (`FRAME_EVERY` and the saved size): plan it first, test first. Dense buffers (tens of frames) are what make frame selection testable; the laptop buffers have only 5.
 2. Score every frame with 2B, 4B, 8B and prompts 1, A, B, for the episode's target and for all six objects. Choose the prompt and model on a split of scenes, report on the other.
