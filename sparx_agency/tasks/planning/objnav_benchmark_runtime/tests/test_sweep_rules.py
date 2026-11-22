@@ -31,3 +31,12 @@ def test_random_rule_picks_k_usable_views_and_depends_on_the_generator():
 
 def test_fewer_usable_views_than_asked_gives_what_there_is():
     assert len(frame_picks(FRAMES, "floor", 10, np.random.default_rng(0))) == 3
+
+
+def test_gate_rule_takes_the_usable_views_with_the_highest_gate_logit():
+    gate = {"a": 2.0, "b": -1.0, "c": 0.5, "d": 9.0, "e": 9.0}
+    assert frame_picks(FRAMES, "gate", 2, np.random.default_rng(0), gate=gate) == ["a", "c"]
+
+
+def test_gate_rule_leaves_out_views_the_gate_never_scored():
+    assert frame_picks(FRAMES, "gate", 3, np.random.default_rng(0), gate={"c": 1.0}) == ["c"]

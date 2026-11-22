@@ -31,11 +31,11 @@ def load_sweep(views):
     return rooms
 
 
-def rule_scores(sweep, answers, rule, count, rng):
+def rule_scores(sweep, answers, rule, count, rng, gate=None):
     """``{(room, target): score}`` choosing ``count`` views by ``rule`` (the mean over the views) or, for ``oracle``, the views that agree best with the truth."""
     out = {}
     for room, entry in sweep.items():
-        picks = frame_picks(entry["frames"], {"all": "floor", "oracle": "random"}.get(rule, rule), 10 ** 6 if rule == "all" else count, rng)
+        picks = frame_picks(entry["frames"], {"all": "floor", "oracle": "random"}.get(rule, rule), 10 ** 6 if rule == "all" else count, rng, gate=gate)
         for target in TARGETS:
             by_frame = {f: answers.get((room, target), {}).get(f) for f in usable_frames(entry["frames"])}
             if rule == "oracle":
