@@ -14,9 +14,13 @@ TIMEOUT_S = 90
 ANSWER = 'Answer with JSON {"percent": <a number from 0 to 100>}.'
 ROOM_PHOTO = "This photo was taken inside one room of a house. "
 VLM_PROMPT = ROOM_PHOTO + "How likely is it that this room contains a %s? " + ANSWER
+PERCENT_PROMPTS = {"percent": VLM_PROMPT,
+                   "unseen": ROOM_PHOTO + "Suppose there is no %s in this photo. How likely is it that one is somewhere else in this room, or in the space just next to it? " + ANSWER,
+                   "nearby": ROOM_PHOTO + "How likely is it that a %s is within a few metres of where this photo was taken, out of view? " + ANSWER}
 YES_NO = {"yesno": ROOM_PHOTO + "Is there a %s in this room? Answer yes or no.",
-          "couldbe": ROOM_PHOTO + "Even if you cannot see one in the photo, could this room contain a %s? Answer yes or no."}
-STYLES = ("percent",) + tuple(YES_NO)
+          "couldbe": ROOM_PHOTO + "Even if you cannot see one in the photo, could this room contain a %s? Answer yes or no.",
+          "keep": "A robot is searching for a %s and cannot see one in this photo. Should it keep searching in and around this room? Answer yes or no."}
+STYLES = tuple(PERCENT_PROMPTS) + tuple(YES_NO)
 TEXT_PROMPT = "A room of a house contains these objects: %s. How likely is it that this room also contains a %s? " + ANSWER
 PHRASE = {"tv_monitor": "TV or monitor"}
 TEXT_FILE = "target_text_%s_%s.jsonl"
@@ -98,7 +102,7 @@ def main(argv=None):
                     image = (folder / "frames" / (frame + ".jpg")).read_bytes()
                     for target in TARGETS:
                         if (frame, target) not in done:
-                            reply = ask_percent(args.url, args.vlm, VLM_PROMPT % phrase(target), image) if args.style == "percent" else ask_yes_no(args.url, args.vlm, YES_NO[args.style] % phrase(target), image)
+                            reply = ask_percent(args.url, args.vlm, PERCENT_PROMPTS[args.style] % phrase(target), image) if args.style in PERCENT_PROMPTS else ask_yes_no(args.url, args.vlm, YES_NO[args.style] % phrase(target), image)
                             handle.write(json.dumps({"room": room, "frame": frame, "target": target, "reply": reply}) + "\n")
                             handle.flush()
     for source in args.sources:
