@@ -78,6 +78,7 @@ def main(argv=None):
     p.add_argument("--door", type=Path, help="folder of the door views (selection.json per scene), asked in addition")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--every", type=int, default=4)
+    p.add_argument("--walk-method", default=WALK_METHOD, help="the selection method whose frames the walk pass asks")
     p.add_argument("--vlm", default="qwen3-vl:4b-instruct")
     p.add_argument("--style", choices=STYLES, default="percent", help="the question: a percent, or yes/no read from log-probabilities")
     p.add_argument("--text", default="qwen2.5:14b-instruct")
@@ -86,7 +87,7 @@ def main(argv=None):
     args = p.parse_args(argv)
     args.out.mkdir(parents=True, exist_ok=True)
     rooms = kept_frames(args.walk, args.every)
-    for label, views, methods, every in (("walk", args.walk, (WALK_METHOD,), args.every), ("door", args.door, ("door0", "door4"), 1)):
+    for label, views, methods, every in (("walk", args.walk, (args.walk_method,), args.every), ("door", args.door, ("door0", "door4"), 1)):
         if views is None:
             continue
         vlm_path = args.out / vlm_file(args.vlm, label, args.style)
