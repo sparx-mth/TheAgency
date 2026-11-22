@@ -8,6 +8,7 @@ import requests
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_eval import objects_text
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.mp3d_text_rooms import object_lists
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.sweep_rules import usable_frames
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.target_score import TARGETS, yes_no_percent
 
 TIMEOUT_S = 90
@@ -60,12 +61,14 @@ def ask_yes_no(url, model, prompt, jpeg_bytes):
     return "" if scored is None else json.dumps({"percent": scored[0], "logit": scored[1]})
 
 
-def kept_frames(views, every, methods=(WALK_METHOD,)):
-    """``{room: (folder, [frame names])}`` for every ``every``-th room, in name order, with the frames the named methods kept (none: not listed)."""
+def kept_frames(views, every, methods=(WALK_METHOD,), only_usable=False):
+    """``{room: (folder, [frame names])}`` for every ``every``-th room, in name order, with the frames the named methods kept (none: not listed); ``only_usable`` drops close-ups and views mostly outside the room."""
     rooms = {}
     for folder in sorted(d for d in views.iterdir() if (d / "selection.json").exists()):
         for room, entry in json.loads((folder / "selection.json").read_text()).items():
             frames = sorted({f for m in methods for f in entry.get("methods", {}).get(m, ())})
+            if only_usable:
+                frames = [f for f in frames if f in usable_frames(entry.get("frames", {}))]
             if frames:
                 rooms[room] = (folder, frames)
     return {room: rooms[room] for room in sorted(rooms)[::every]}
@@ -83,6 +86,7 @@ def main(argv=None):
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--every", type=int, default=4)
     p.add_argument("--walk-method", default=WALK_METHOD, help="the selection method whose frames the walk pass asks")
+    p.add_argument("--only-usable", action="store_true", help="the walk pass skips close-ups and views mostly outside the room")
     p.add_argument("--vlm", default="qwen3-vl:4b-instruct")
     p.add_argument("--style", choices=STYLES, default="percent", help="the question: a percent, or yes/no read from log-probabilities")
     p.add_argument("--text", default="qwen2.5:14b-instruct")
@@ -97,7 +101,7 @@ def main(argv=None):
         vlm_path = args.out / vlm_file(args.vlm, label, args.style)
         done = done_rows(vlm_path, ("frame", "target"))
         with open(vlm_path, "a") as handle:
-            for room, (folder, frames) in kept_frames(views, every, methods).items():
+            for room, (folder, frames) in kept_frames(views, every, methods, args.only_usable and label == "walk").items():
                 for frame in frames:
                     image = (folder / "frames" / (frame + ".jpg")).read_bytes()
                     for target in TARGETS:
