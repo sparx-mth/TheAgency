@@ -622,6 +622,40 @@ def unknown_view_for(policy, world):
                        resolved=sight.resolved(world) if sight is not None else None)
 
 
+def merge_near_seed(items: Sequence, radius_m: float, xy=None) -> List[List]:
+    """Group ``items`` greedily, in the order given: each joins the first group whose SEED lies within ``radius_m``, else seeds a new one.
+
+    The seed of a group is its first item, so the order is the caller's
+    statement of which item stands for a group -- the best exit of a
+    doorway (:func:`detect_openings`), the longest boundary of a frontier
+    node (``frontier_views/nodes.py``). Seeds end up more than ``radius_m``
+    apart from every earlier seed, which is what keeps two groups from
+    claiming one sticky id when ``radius_m`` is at least the registry's
+    ``match_m``.
+
+    Args:
+        items: What to group, best first.
+        radius_m: An item this close to a group's seed is part of it.
+        xy: ``item -> (x, y)`` in metres; the item's own ``xy`` by default.
+
+    Returns:
+        The groups, in seed order; every group lists its seed first.
+    """
+    where = xy if xy is not None else (lambda item: item.xy)
+    groups: List[List] = []
+    seeds: List[Tuple[float, float]] = []
+    for item in items:
+        point = where(item)
+        for group, seed in zip(groups, seeds):
+            if math.dist(seed, point) <= radius_m:
+                group.append(item)
+                break
+        else:
+            groups.append([item])
+            seeds.append(point)
+    return groups
+
+
 def detect_openings(policy, obs, world, settings: OpeningSettings, registry: OpeningRegistry) -> List[Opening]:
     """The storey's openings this action, best first, from the frontier inventory.
 
@@ -654,14 +688,7 @@ def detect_openings(policy, obs, world, settings: OpeningSettings, registry: Ope
     if not exits:
         return []
     room_of = goal_rooms(inventory)
-    clusters: List[List] = []
-    for goal in exits:                                  # utility order: the seed is the best exit of its cluster
-        for cluster in clusters:
-            if math.dist(cluster[0].xy, goal.xy) <= settings.merge_m:
-                cluster.append(goal)
-                break
-        else:
-            clusters.append([goal])
+    clusters = merge_near_seed(exits, settings.merge_m)   # utility order: the seed is the best exit of its cluster
     floor = p.mapping.floor_id
     doors = list(p.doors.confirmed()) if getattr(p, "doors", None) is not None else []
     rooms = p.graph.registry.rooms

@@ -5,6 +5,60 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-22, frontier views: which past frames show a frontier node, chosen from geometry before any model is asked -- the second piece of the VLM pipeline, `core/planning/object_search/frontier_views`, with its offline replay)
+- **The unit a picture is asked about.** `FrontierNode` (`nodes.py`): the clusters of the frontier inventory merged
+  within 1.5 m of the longest, floored at five cells, with a sticky id from an `OpeningRegistry` and the seed's goal
+  point -- the cells a frame selector needs, the id a kept answer needs and the `id -> (x, y)` RPT\* takes. The
+  openings' own merge and registry, without `detect_openings`' dependence on the loop this pipeline replaces (three
+  of six replayed episodes never listed an opening; their maps held 6 to 13 reachable clusters an action).
+- **What counts as a view** (`sight.py`, `settings.py`). Per logged frame and cell of a node: in range (8 m), in the
+  picture (the share of a 0-1.5 m height band clipped exactly against the image, so the camera's pitch needs no rule),
+  seen along a sight line over the map of THIS decision, and seen THROUGH into unsettled unknown or not. Quality is
+  the range falloff x the band's share x (1 through, `at_weight` 0.5 seen only).
+- **Strategy B as proposed scores a third of the nodes, and why.** "Only a frame whose rays leave the map through
+  the cluster" (`at_weight` 0, kept as the replay's `through_only` variant) scored 32 % of the nodes: the map's
+  boundary is the edge of what every frame's depth resolved, so a frame looks past it only from beyond its depth
+  range. Counting a cell seen but not seen through at half scores 81 %. Two readings of "seen" also had to give way
+  for a boundary to be visible from the frame that made it: unknown cells touching known floor hide nothing (59 % to
+  63 %), and a corner clipped by one cell is not a wall (`corner_slack_cells`, 63 % to 81 %).
+- **The choice** (`selection.py`). `select_views`: one to three frames per node by greedy coverage of its cells (a
+  further frame only for a fifth more), each with the **window** the node lands in; between equals the frame that
+  sees past more, then the one with the node nearest the middle of the picture, then the latest. A node with no
+  usable view says which gate every frame failed. Each node is chosen for on its own: one question per node.
+- **Score once** (`score_ledger.py`). `ScoreLedger`: a node is due the first action it has a usable view, is never
+  asked about again, and is marked blocked when it is still there twelve actions after the agent first stood at it.
+  `min_age_steps` (0, the rule as decided) holds a node back; see the replay for why the knob exists.
+- **The offline replay** (`tasks/planning/objnav_benchmark_runtime/frontier_view_replay.py`, with
+  `frontier_view_frames.py`, `frontier_view_hindsight.py`, `frontier_view_metrics.py`, `frontier_view_sheets.py`). A
+  recording and its frame log walked again with no simulator, policy or model: the frontier inventory rebuilt on the
+  journal's map of every action by the method's own code and compared with the one the recording lists, the nodes,
+  the views, the score-once rule -- for the selector as configured, its strict reading and the action's own frame
+  alone -- then coverage, the would-be model calls, what the chosen frames showed of the space mapped LATER behind
+  each node, what waiting would have bought, and a contact sheet per scoring and per long-lived node never scored.
+- **What it found** on six MP3D v1 val episodes (CPU, stand-in LLM, ground-truth perception; 719 actions, 112 node
+  ids; dated examples to set thresholds by, not a result of the method): 91 nodes scored (81 %), 73 of them on the
+  action they appeared; a score in hand on 81 % of node-actions; 12.7 calls per 100 actions; one frame in 82 calls,
+  two in 9. The frame that made a node is usually the one chosen -- the action's own frame alone scores 77 %, so the
+  frame log buys the nodes the camera has turned away from, not better views. Of the space mapped later behind a
+  node the chosen frames had a clear line to 9 %, and no logged frame to more than 12 %: what a model is shown is
+  the boundary, not what lies behind it. Waiting buys little (median score 0.32 on a node's last action against
+  0.28 at scoring). Nearly a quarter of the calls (21) went to nodes gone two actions later; `min_age_steps = 3`
+  leaves 4 and 8.8 calls per 100 actions at 67 % score-in-hand. Six long-lived nodes were never scored because the
+  two-dimensional map hides what the camera sees over (a bench); ten were still there well after a visit.
+- **Changed for it, behaviour unchanged.** `FrontierInventory.clusters` (`core/planning/exploration/frontier_ranking.py`):
+  the cells of every goal's cluster, in the goals' order, from the one extraction. `merge_near_seed` extracted from
+  `detect_openings` (`rooms/opening_nodes.py`), which now calls it. `RPTSettings.planner_params()`: the route
+  planner the settings configure, built by the policy and by the replay from one definition.
+- **Checked.** 69 new tests (53 in `frontier_views/tests`, 14 in `objnav_benchmark_runtime/tests/test_frontier_view_replay.py`
+  -- a synthetic recording with a frame log whose every answer follows from its floor plan, and a real one when one
+  is on the machine -- one each for the inventory's clusters and the planner's single definition); 80 planted faults
+  (a mirrored projection, walls that do not block, a frame chosen twice, a node scored twice, hindsight read off the
+  wrong map, a stale snapshot compared, another run's frame log accepted, ...) each fail at least one. The six
+  episodes flown again on the tree with the three changes above are identical in length and SPL to the run before
+  them; the replay's rebuilt inventory is the recorded one on all 193 actions on which the recording built its own;
+  and two episodes replayed under the benchmark's interpreter (Python 3.9, numpy 1.26, OpenCV 4) give the numbers of
+  the test interpreter (3.12, numpy 2, OpenCV 5) value for value.
+
 ### Added (2026-11-22, the frame log: every RGB frame of an episode kept under its capture pose -- the first piece of the VLM pipeline, `core/planning/object_search/frame_log`)
 - **What it keeps.** `EpisodeFrameLog` holds every RGB frame the room-search policy decides on, named after its step
   (`step_000137.jpg`), and a lookup dictionary from a frame's name to its `FrameRecord`: the step and the exact

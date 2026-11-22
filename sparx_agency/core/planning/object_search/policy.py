@@ -44,7 +44,6 @@ from sparx_agency.core.planning.interfaces.planner import PlanRequest
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.objnav.action_converter.params import ActionConverterParams
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
-from sparx_agency.core.planning.planners.astar.params import WeightedAStarParams
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.core.planning.planners.astar.weighted_planner_2d import WeightedAStarPlanner2D
 from sparx_agency.core.planning.object_search.world_model.observed_map import ObservedMap
@@ -100,17 +99,9 @@ class RPTSearchPolicy:
         self.converter_params = ActionConverterParams(
             heading_hysteresis_deg=0.0 if s.kinematic.strict_tracking else 1.0,
             strict_plan_tracking=s.kinematic.strict_tracking)
-        # A ground agent squeezes rather than detours: a route at the preferred standoff more than
-        # ``detour_factor`` times the squeeze route is a detour, and the squeeze is walked -- down to
-        # ``min_clearance_m``, not the body radius (see RPTSettings: HM3D refuses any contact).
-        # The medial-axis layer (``centreline_weight``) threads doorways through their middle; the lattice
-        # follower then walks the route on the benchmark's own step and turn (``navigation/``).
-        self.planner_params = WeightedAStarParams(
-            inflate_radius_m=s.preferred_clearance_m, inflate_floor_m=s.min_clearance_m,
-            detour_factor=s.detour_factor,
-            unknown_blocked=True, goal_snap_radius_m=0.3, waypoint_spacing_m=0.25,
-            start_skip_m=0.0, search_margin_m=s.map_size_m,
-            centreline_weight=s.centreline_weight, channel_half_width_m=s.channel_half_width_m)
+        # The planner is the settings' own (``RPTSettings.planner_params``: squeeze rather than detour, the
+        # medial-axis layer through doorways), so an offline replay of a recorded action builds the same one.
+        self.planner_params = s.planner_params()
         self.loop_settings = LoopSettings(**s.room_search)
         self.supervisor_params = self.loop_settings.supervisor_params(s.seed)
         self.door_settings, self.room_label_settings = DoorSettings(), RoomLabelSettings(**s.room_labels)

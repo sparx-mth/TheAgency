@@ -873,6 +873,9 @@ tasks/planning/objnav_benchmark_runtime/   THIS TREE: the adapters and the opera
     recording.py, visualization.py, floor_panels.py, search_panel.py, dashboard.py   the step log, the map journal, video, HUD, live page
     review_recording.py   read a recording by step from the log (summary, timeline, step N, map N, events)
     room_extent_replay.py   replay a recording's maps and poses through the room extents, offline (sizes, coverage, the FINAL promise)
+    frontier_view_replay.py   replay a recording and its frame log through the frontier-view selector, offline: which past
+                       frames each frontier node would be shown with (frontier_view_frames.py finds the frames,
+                       frontier_view_hindsight.py and frontier_view_metrics.py measure, frontier_view_sheets.py draws)
     tests/             the method's regression rig (fake services, the benchmark camera, synthetic maps) and the adapter tests
 ```
 
@@ -1022,6 +1025,11 @@ action converter serialises the LOOK before the body action):
 | `recording.py`, `floor_panels.py`, `search_panel.py`, `visualization.py` | Exact commands/poses, persistent UNKNOWN panels with the rooms and visit order drawn on the active floor, the search column, grids and video; `floor_panels.py` also keeps the per-action **map journal** (`map_journal.npz`) |
 | `review_recording.py` | The log-side review of a recording: `summary`, `timeline`, `step N` (everything the log holds about one action, and the map of that action by sector round the agent), `map N` (the map of that action as text), `events`. A review pointed at a step reads this, never a video frame |
 | `room_extent_replay.py` | A recording replayed offline through the room extents (`core/mapping/topology/room_extent.py`, since 2026-11-16): the journal's maps and partitions action by action, the per-cell observed record rebuilt from the recorded poses with the benchmark camera, `room_extents()` on each. It reads the recording's own map and poses and nothing else -- no simulator, no dataset. Its checks say whether the observed floor was conserved across the partition's changes and classify every growth after a FINAL reading as a merge, a moved cut, a fragment or a BREACH -- a room that grew through a side the reading had called located (`--json` keeps the records) |
+| `frontier_view_replay.py` | A recording and its frame log replayed offline through the frontier-view selector (`core/planning/object_search/frontier_views`, since 2026-11-22), with no simulator, policy or model: the frontier inventory rebuilt on the journal's map of every action by the method's own code (`RPTSettings.planner_params`, `accessible_frontiers`) and compared with the one the recording lists; its clusters as frontier nodes with sticky ids; for every node the one to three frames that show it; the score-once rule. Three variants over the same nodes -- the selector as configured, its strict reading (only a frame that looks past the boundary), and the action's own frame alone (no frame log). See "Which frames show a frontier" below |
+| `frontier_view_frames.py` | The frames a replay chooses from: the run's frame log, checked pose by pose against the recording before it is believed, or -- without one -- a frame per recorded action at its recorded pose |
+| `frontier_view_hindsight.py` | What a selection could not know when it was made: how much of the space behind a node that the episode mapped LATER the chosen frames had a clear line to (and any frame logged so far, which no selector can beat), and what the node's views were on the last action it existed |
+| `frontier_view_metrics.py` | The replay as numbers per variant, per episode and pooled (values pooled before any median): nodes scored, when, the would-be model calls, node-actions with a score in hand, the reasons of the nodes never scored |
+| `frontier_view_sheets.py` | The replay as pictures: one sheet per scoring -- the map of the action with the node and the space mapped later behind it, and the chosen frames with the node's window and height band drawn in -- and one per long-lived node never scored, with the frames that faced it |
 | `gibson/run.py`, `hm3d/run.py`, their `frozen_eval.py`, `run_development.py` | Per-task protocol execution and frozen source/model/data checks |
 | `tests/trace_room_search_loop.py` | Development probe: the loop on the production map size with fake services and the real action converter on a point agent; not a test |
 
@@ -2823,6 +2831,69 @@ What follows from that:
   for a 243-action MP3D episode (JPEG quality 95, 640 x 480, measured
   2026-11-22) -- extrapolated from that one episode, tens of gigabytes for a
   full split.
+
+### Which frames show a frontier: `frontier_view_replay` (since 2026-11-22)
+
+The next piece of the VLM pipeline asks a model what lies behind a frontier
+from the past frames that look at it. Whether such frames exist, how many
+questions that is and what the frames show can be read off a recording and
+its frame log before any model is asked -- with no simulator, no policy and
+nothing on the GPU:
+
+```bash
+RUN=runs/<campaign>                                           # a run recorded with --record and OBJNAV_FRAME_LOG_DIR=$RUN/frames
+python -m sparx_agency.tasks.planning.objnav_benchmark_runtime.frontier_view_replay \
+    $RUN/<scene>/recordings/* --frames $RUN/frames \
+    --json $RUN/replay/replay.json --sheets $RUN/replay/sheets          # the report is printed; one more for several episodes pooled
+```
+
+The replay walks each episode again. On the journal's map of every action it
+rebuilds the frontier inventory with the method's own code, turns its
+clusters into **frontier nodes** with sticky ids, offers every node not yet
+scored the frames logged so far, and applies the score-once rule
+(`core/planning/object_search/frontier_views`; its README is the authority on
+what a node, a view and a score are, and holds the numbers of the first
+replay). What it prints, per episode and pooled:
+
+- **fidelity** -- on how many actions the inventory it rebuilt was the one the
+  recording lists (compared wherever the recording built its own on that
+  action). The nodes are only as true as that line;
+- **coverage** -- nodes scored, on the action they appeared or later, and never,
+  with the gate every frame failed for the long-lived ones; the share of
+  node-actions with a score in hand;
+- **cost** -- scorings are the would-be model calls; calls per 100 actions,
+  distinct pictures, calls spent on nodes gone two actions later;
+- **what the pictures are** -- the share of the node seen, how many look past
+  the boundary, the range and the width of the node's window in the picture;
+- **in hindsight** -- of the space behind a node that the episode mapped later,
+  the share the chosen frames had a clear line to, beside the share any frame
+  logged so far had;
+- **what waiting would buy** -- the same node's views on the last action it
+  existed.
+
+Each is given for three variants over the same nodes: `selected` (the selector
+as configured), `through_only` (its strict reading: only a frame that looks
+past the boundary is a view) and `current_frame` (no frame log at all: the
+frame of the action alone). `--at-weight`, `--max-range`, `--max-frames`,
+`--corner-slack`, `--min-cells` and `--min-age` move one threshold of the
+`selected` variant for a sweep; `--no-hindsight` skips the two measures that
+need the rest of the recording.
+
+`--sheets` writes what the numbers cannot show: per scoring, the map of the
+action -- the node red, the space mapped later behind it green, the agent and
+each chosen camera -- beside the chosen frames, each with the node's window and,
+over every cell of the node the frame sees, the height band it was judged on
+(green where the frame looks past the cell, yellow where it sees the cell and
+no further). A long-lived node that was never scored gets a sheet too
+(`unscored_*.jpg`), with the two frames that came closest and the band red
+over every cell they face and do not reach: a red band over open floor behind
+a bench is the two-dimensional map hiding what the camera looked straight
+over.
+
+Without `--frames` the frames are taken to be one per recorded action at the
+recorded pose -- which is what a frame log holds -- so any recording with a map
+journal can be replayed for the numbers; the sheets need the images. A frame
+log whose poses are not the recording's is refused, not replayed.
 
 ## Dependencies and validation
 

@@ -366,6 +366,34 @@ def test_distances_are_measured_at_the_preferred_standoff_where_it_reaches():
         accessible_frontiers(world, body, labels, origin, math.pi, preferred_cost=preferred[:3])
 
 
+def test_the_inventory_keeps_the_cells_of_every_goals_cluster_in_the_goals_order():
+    """A goal is a point; whatever asks where the boundary runs needs the cells, from the same extraction."""
+    from sparx_agency.core.planning.exploration.frontier_ranking import accessible_frontiers
+    world = world_from([
+        "############",
+        "#??......???",
+        "#??......???",
+        "#........???",
+        "#..........#",
+        "#....??....#",
+        "############",
+    ])
+    labels = np.ones(world.grid.shape, dtype=np.int32)
+    inventory = accessible_frontiers(world, flat_cost(world), labels, at(5, 3), 0.0)
+    assert len(inventory.goals) >= 3 and len(inventory.clusters) == len(inventory.goals)
+    assert [goal.utility for goal in inventory.goals] == sorted((g.utility for g in inventory.goals), reverse=True)
+    covered = np.zeros(world.grid.shape, dtype=bool)
+    for goal, cluster in zip(inventory.goals, inventory.clusters):
+        assert cluster.cell == goal.cell and cluster.size == goal.size_cells == len(cluster.rows)
+        assert (world.grid[cluster.rows, cluster.cols] == FREE).all()
+        assert not covered[cluster.rows, cluster.cols].any(), "a cell belongs to one cluster"
+        covered[cluster.rows, cluster.cols] = True
+    assert (covered == inventory.cells).all(), "the clusters are the inventory's display cells, no more and no fewer"
+    # An inventory with nothing reachable has no clusters either.
+    walled_in = accessible_frontiers(world, np.full(world.grid.shape, np.inf), labels, at(5, 3), 0.0)
+    assert walled_in.goals == () and walled_in.clusters == ()
+
+
 # -- the explore visit's order: what a look from the frontier would reveal (2026-10-13) ---------
 def test_view_gain_ranks_a_doorway_onto_a_room_above_a_longer_strip_along_a_wall():
     """Two frontiers at equal distance from the robot at (4, 4), facing +x: a long strip of unknown along the

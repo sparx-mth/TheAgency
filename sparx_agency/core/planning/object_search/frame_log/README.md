@@ -132,9 +132,13 @@ the memory store is for.
 
 ## Not here yet, on purpose
 
-Which frames are worth keeping (the log keeps all of them), which frames
-stand for a frontier cluster, the VLM client and its recorded answers, and
-depth. Each is a consumer or a filter of this log, not part of it.
+Which frames are worth keeping (the log keeps all of them), the VLM client and
+its recorded answers, and depth. Each is a consumer or a filter of this log,
+not part of it. Which frames stand for a frontier cluster is the first
+consumer, beside this package: [`frontier_views/`](../frontier_views/README.md)
+chooses them from the `records` of this log and the map -- offline so far, in
+the replay of a recording
+(`tasks/planning/objnav_benchmark_runtime/frontier_view_replay.py`).
 
 ## Tests
 

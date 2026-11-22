@@ -142,12 +142,21 @@ class FrontierInventory:
     Counts describe accessibility, not whether a goal was recently retired.
     Unassigned frontiers remain available to floor-wide exploration. Distances
     are metres from the current pose; infinity means not currently accessible.
+
+    ``clusters`` (since 2026-11-22) holds, for every goal and in the goals'
+    order, the cluster it stands for -- its member cells -- with ``cell`` set
+    to the goal's own cell: ``clusters[i].cell == goals[i].cell``. A goal is a
+    point; whatever asks where the boundary itself runs (which past frame
+    looked at it: ``object_search/frontier_views``) needs the cells, from the
+    one extraction the goals came from. Empty on an inventory built without
+    them.
     """
 
     goals: Tuple[FrontierGoal, ...]
     by_room: Dict[int, List[FrontierGoal]]
     cells: np.ndarray
     distance_m: np.ndarray
+    clusters: Tuple[FrontierCluster, ...] = ()
 
 
 def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None, preferred_cost=None,
@@ -204,7 +213,7 @@ def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None, 
         raise ValueError("frontier_world %s is not shaped like world %s" % (frontier_world.grid.shape, world.grid.shape))
     clusters = frontier_clusters(world if frontier_world is None else frontier_world, source_component, ids)
     blocked = world.grid != world.values.free
-    goals, by_room = [], {}
+    goals, by_room, kept = [], {}, {}
     for cluster in clusters:
         gx, gy = cluster.cell
         members = distances[cluster.rows, cluster.cols]
@@ -219,6 +228,7 @@ def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None, 
             continue
         goal = _rank_by_distance(world, [cluster], distances, origin_xy, yaw, params)[0]
         goals.append(goal)
+        kept[id(goal)] = cluster
         cells[cluster.rows, cluster.cols] = True
         room = _room_of(labels, cluster)
         if room is not None:
@@ -226,7 +236,7 @@ def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None, 
     goals.sort(key=lambda g: (-g.utility, g.geodesic_m))
     for members in by_room.values():
         members.sort(key=lambda g: (-g.utility, g.geodesic_m))
-    return FrontierInventory(tuple(goals), by_room, cells, distances)
+    return FrontierInventory(tuple(goals), by_room, cells, distances, tuple(kept[id(goal)] for goal in goals))
 
 
 def ranked_frontier_goals(world: OccupancyGrid2D,

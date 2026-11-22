@@ -10,6 +10,7 @@ from sparx_agency.core.planning.object_search.exploration.doorway_candidates imp
 from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosingSettings
 from sparx_agency.core.planning.object_search.navigation.settings import (KinematicSettings, LookDownSettings,
                                                                            ScrapeSettings)
+from sparx_agency.core.planning.planners.astar.params import WeightedAStarParams
 
 
 @dataclass(frozen=True)
@@ -343,3 +344,27 @@ class RPTSettings:
             value = getattr(self, name)
             if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
                 raise ValueError("%s must be a JSON object of setting overrides" % name)
+
+    def planner_params(self) -> WeightedAStarParams:
+        """The route planner as these settings configure it -- the one definition the policy and every replay of it share.
+
+        A ground agent squeezes rather than detours: a route at the preferred
+        standoff more than ``detour_factor`` times the squeeze route is a
+        detour, and the squeeze is walked -- down to ``min_clearance_m``, not
+        the body radius (HM3D refuses any contact). The medial-axis layer
+        (``centreline_weight``) threads doorways through their middle; the
+        lattice follower then walks the route on the benchmark's own step and
+        turn (``navigation/``).
+
+        The cost grids every count, entry and distance is read from come out
+        of a planner built on this (``RPTSearchPolicy.navigation_cost``,
+        ``preferred_cost``); an offline tool that rebuilds the frontier
+        inventory of a recorded action (``frontier_view_replay``) builds it
+        from here too, so the two cannot disagree on what is passable.
+        """
+        return WeightedAStarParams(
+            inflate_radius_m=self.preferred_clearance_m, inflate_floor_m=self.min_clearance_m,
+            detour_factor=self.detour_factor,
+            unknown_blocked=True, goal_snap_radius_m=0.3, waypoint_spacing_m=0.25,
+            start_skip_m=0.0, search_margin_m=self.map_size_m,
+            centreline_weight=self.centreline_weight, channel_half_width_m=self.channel_half_width_m)

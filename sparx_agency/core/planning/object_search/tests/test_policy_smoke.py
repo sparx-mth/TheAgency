@@ -56,6 +56,19 @@ def test_the_configuration_and_the_episode_info_serialise():
     json.dumps(info, default=str)
 
 
+def test_the_planner_is_the_settings_own_so_a_replay_of_a_recorded_action_builds_the_same_one():
+    """``RPTSettings.planner_params`` is the one definition: the policy's planner and its record are built from it."""
+    from dataclasses import asdict
+    policy, _ = make_policy(min_clearance_m=0.22, preferred_clearance_m=0.34, detour_factor=2.0)
+    params = policy.settings.planner_params()
+    assert policy.planner_params == params and policy.planner.params == params
+    assert (params.inflate_radius_m, params.inflate_floor_m, params.detour_factor) == (0.34, 0.22, 2.0)
+    assert params.unknown_blocked is True and params.search_margin_m == policy.settings.map_size_m
+    assert (params.centreline_weight, params.channel_half_width_m) == (
+        policy.settings.centreline_weight, policy.settings.channel_half_width_m)
+    assert policy.configuration()["planner"] == asdict(params)
+
+
 def test_the_run_record_names_the_oracles_prompt_version_and_the_oracle_is_asked_under_it():
     """A wording is tuned per model (``search_node_prompts.py``): the run record says which version was used -- its
     name, the model it was tuned on, the digest of its text -- and an unregistered name is refused at start-up."""
