@@ -249,6 +249,53 @@ its memory is full. One MP3D ground-truth renderer takes 270-1,180 MiB by scene
 (~820 mean), so a 0.90 cap holds 7-8 beside the LLM at Ollama's defaults; the
 campaign runs ~110 episodes/h (~16 answers an episode).
 
+### Two models under one prompt, one command: `run_gt_3b_then_14b.sh` (2026-11-19)
+
+The model comparison on the full val split under ground-truth perception:
+`qwen2.5:3b-instruct` in both LLM roles, then `qwen2.5:14b-instruct`, both asked
+under the 3B's prompt version `facts-qwen2.5-3b-v1` (digest `2d025f01...`) so
+that only the model differs. The 14B asked under the 3B's prompt is recorded
+(`node_oracle.model.prompt_tuned_on_it: false`), never refused.
+
+```bash
+mp3d/run_gt_3b_then_14b.sh --detach     # start, or RESUME after any interruption (the same command)
+mp3d/run_gt_3b_then_14b.sh --status     # per stage: smoke, rows, live shard progress and ETA, governor, commits
+mp3d/run_gt_3b_then_14b.sh --stop       # stop for good (STOP file + TERM; the launcher stops shards and servers)
+```
+
+Per stage: checks (branch `feat/objnav-habitat-mp3d-nadav` containing
+`a13214e2`, the registered prompt's digest, both models in the native store --
+pulled if absent --, `nvidia-smi`, no stale launcher), a 3-episode smoke (the
+first episode of `pLe4wQe7qrG`, `zsNo4HB9uLZ`, `oLBMNvg9in8`: 3 rows, no agent
+error, the digest and model in `run.json`, answers recorded from that model),
+the sharded campaign (shards of 10; after each launch: every Ollama server
+answers, workers alive, the first `run.json`'s `node_oracle.prompt` digest), a
+relaunch-to-resume when a launch ends short of a complete split, and finally
+`results_summary.py` into `mp3d/results/<campaign>_stage<N>_<model>/` (SR and
+SPL overall and per category, episodes, model, prompt version and digest,
+source commit, start and end times), committed and pushed -- never forced; a
+failed commit or push is logged and the next stage starts. Its own Ollama
+servers listen from port 11440, so the resident 11434/11435 are left alone.
+
+Parallelism, from the measurements above (target <= 90 % of GPU, VRAM, CPU and
+RAM): the 3B on **2 servers x 5 slots, <= 16 workers** (each server's JSON
+sampling is serial, so a second server is worth more than slots); the 14B on
+**1 server x 4 slots, <= 7 workers**. The pool's VRAM gate (`VRAM_CAP` 0.88,
+850 MiB a renderer) delays starts; `jobs_governor.py` lowers the live jobs file
+when a 2-minute mean of CPU, RAM, VRAM or GPU compute passes 90 % and raises it
+back after 30 calm minutes.
+
+Logs, under `runs/mp3d_v1_gt_3b_vs_14b/`: `support/orchestrator.log` (every
+check and decision), `support/stage<N>_launcher.out`, `stage<N>_commands.txt`
+(the exact environment and command of every launch),
+`stage<N>_utilization.csv` (`../utilization_log.py`, 15 s),
+`stage<N>_governor.csv`; per stage root the launcher's `run.log`,
+`preflight.json`, `gpu_plan.json`, `source-commit.txt`, `source-changes.diff`,
+`ollama*.log`, per scene `run.json` and full `episodes.jsonl`, per episode
+`steps.jsonl` + `trajectory.csv` + map journal (`--record-log-only`); and beside
+each root `<root>_llm_answers/` (every LLM request -- system and user prompt,
+model, episode -- and its reply).
+
 ### The fixed single-storey set (the study of 2026-11-10)
 
 The method's single-storey potential is measured on one fixed list of episodes,
@@ -476,5 +523,6 @@ evidence and the deviations we name rather than apply.
 | `single_storey_report.py`, `single_storey_failures.py` | baseline-versus-steps table (paired); per-failure mechanism from the recordings, the lock / sliver data, the labeller tally |
 | `cpu_stub_campaign.py`, `ram_gate.py`, `stuck_report.py`, `../stub_llm.py` | the paired before/after check on that set with no GPU and no model: the CPU launcher, the pool's start gate on free RAM (the first pending scene that fits), the stuck-indicator table with the identical-trajectory count, the stand-in for the language model |
 | `smooth_replay.py` | visualization-only smooth replay of a recording |
+| `run_gt_3b_then_14b.sh`, `results_summary.py`, `jobs_governor.py`, `results/` | the one-command 3B-then-14B ground-truth comparison (section 3): checks, smoke, sharded campaign, resume; the committable per-stage summary; the live-jobs governor that keeps the machine under 90 % |
 | `../ground_truth/mp3d_categories.py` | the ground-truth perception's MP3D table (mpcat40 goal classes, context words) |
 | `../tests/test_mp3d*.py` | the adapter without Matterport3D, habitat-sim or a GPU (`test_mp3d_ground_truth.py`: the oracle path) |
