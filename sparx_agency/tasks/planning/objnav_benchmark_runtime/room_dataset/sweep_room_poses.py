@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import protocol_for
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.report_sweep import load_sweep
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.select_door_views import render_at, visible_targets
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.select_grid_views import MIN_ROOM_CELLS, find_entrance
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.select_hm3d_views import Hm3dScene
@@ -47,14 +48,19 @@ def main(argv=None):
     p.add_argument("--scenes-dir", default=os.environ.get("HM3D_SCENES_DIR"))
     p.add_argument("--every", type=int, default=2, help="sweep every this-many-th room, in name order")
     p.add_argument("--seed", type=int, default=17)
+    p.add_argument("--only-rooms", type=Path, help="sweep only the rooms found in this views folder")
+    p.add_argument("--skip-rooms", type=Path, help="leave out the rooms already in this views folder")
     args = p.parse_args(argv)
     protocol = protocol_for("v1").with_split("train")
+    only = set(load_sweep(args.only_rooms)) if args.only_rooms else None
+    skip = set(load_sweep(args.skip_rooms)) if args.skip_rooms else set()
     for folder in sorted(d for d in args.rooms.iterdir() if (d / "rooms.json").exists()):
         scene = folder.name
         if (args.out / scene / "selection.json").exists():
             continue
         try:
             rooms = sorted(json.loads((folder / "rooms.json").read_text()), key=lambda r: r["room"])[::args.every]
+            rooms = [r for r in rooms if (only is None or r["room"] in only) and r["room"] not in skip]
             (args.out / scene / "frames").mkdir(parents=True, exist_ok=True)
             hm3d = Hm3dScene(scene, args.scenes_dir, protocol, args.seed, folder)
             result = {room["room"]: sweep_room(hm3d, room, protocol, args.seed, args.out / scene) for room in rooms}
