@@ -83,8 +83,11 @@ from sparx_agency.core.planning.object_search.closing.target_pursuit import Targ
 class RPTSearchPolicy:
     name = "sparx-rpt-llm-host-sweep"
 
-    def __init__(self, detector, llm_client, settings=None, segmenter=None):
+    def __init__(self, detector, llm_client, settings=None, segmenter=None, frame_log=None):
         self.detector, self.llm_client, self.segmenter = detector, llm_client, segmenter
+        # Optional (2026-11-22): every RGB frame the policy decides on, kept under its capture pose
+        # (``frame_log/``). Begun at each reset and fed before anything else reads the frame; None keeps none.
+        self.frame_log = frame_log
         self.settings = settings or RPTSettings()
         s = self.settings
         if s.segmentation and segmenter is None:
@@ -331,6 +334,8 @@ class RPTSearchPolicy:
         if scope is not None:
             scope(episode.episode_id)          # an answer store keys by episode (llm_answer_cache)
         self._llm_answers_at_reset = self._llm_answer_totals()
+        if self.frame_log is not None:
+            self.frame_log.begin(episode)      # the episode's own frames from here on (frame_log/)
         s = self.settings
         self.mapping = ObservedMap(s.map_size_m, s.map_resolution_m, s.depth_stride, s.body_height_m, s.body_radius_m, s.multifloor,
                                    sticky_bump_actions=s.sticky_bump_actions)
@@ -598,6 +603,10 @@ class RPTSearchPolicy:
         self.telemetry.emitted(observation, action, self.telemetry.phase)
 
     def _plan(self, observation):
+        if self.frame_log is not None:
+            # Before perception, mapping or the decision: the log holds every frame a decision was taken on, and a
+            # frame that cannot be kept ends the run (``FrameLogError``) instead of leaving a hole in the memory.
+            self.frame_log.add(observation)
         self.perception.observe(observation)
         self.closing.observe(observation)
         if self.closing.active:

@@ -24,6 +24,14 @@ on it, ``segmentation`` is on unless the policy config says otherwise (the
 instance masks are the point), and the run is **non-publishable**: it is the
 method's upper bound under ideal perception, not a benchmark result.
 
+``OBJNAV_FRAME_LOG_DIR=<dir>`` (since 2026-11-22) hands the room-search policy
+a frame log (``core/planning/object_search/frame_log``): every RGB frame it
+decides on is kept under that directory, one folder per episode, beside the
+index that maps each image's file name to its capture pose. It changes no
+decision; the run's record says where the frames went, and only when the
+variable is set. Only ``--agent rpt`` keeps one -- with another agent the
+variable is refused, not ignored.
+
 Importing this module loads no service client, model or simulator; the HTTP
 clients are imported when a policy is built.
 """
@@ -107,11 +115,17 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
         identities, ``publishable``).
 
     Raises:
-        ValueError: Options that contradict each other or the policy config.
+        ValueError: Options that contradict each other or the policy config; or ``OBJNAV_FRAME_LOG_DIR`` set
+            for an agent that keeps no frame log.
         RuntimeError: A service is unreachable, misconfigured or hides the detections the
             method needs; or ground-truth perception was asked of an adapter that cannot
             publish semantic frames.
     """
+    from sparx_agency.core.planning.object_search.frame_log.episode_frame_log import FRAME_LOG_DIR_ENV, EpisodeFrameLog
+    frame_log = EpisodeFrameLog.from_env()             # OBJNAV_FRAME_LOG_DIR; None keeps no frames
+    if frame_log is not None and args.agent != "rpt":
+        raise ValueError("%s is set, but only --agent rpt keeps a frame log and this run asked for --agent %s; "
+                         "unset it for this run" % (FRAME_LOG_DIR_ENV, args.agent))
     if args.agent == "stop":
         return StopDiagnostic(), {"method": "diagnostic-stop", "publishable": False}
     baseline = args.agent == "falcon-yolo"
@@ -219,7 +233,7 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
         floor = settings.detection_confidence
     else:
         from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy
-        policy = RPTSearchPolicy(detector, client, settings, segmenter=segmenter)
+        policy = RPTSearchPolicy(detector, client, settings, segmenter=segmenter, frame_log=frame_log)
         floor = min(settings.detection_confidence, policy.door_settings.confidence)
     emitted = float(identities["detector"]["metadata"]["detector_config"]["conf_thresh"])
     if emitted > floor:
@@ -236,6 +250,9 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
             info.update(llm_answers=answers.describe())
         if exclusive is not None:
             info.update(llm_exclusive=exclusive.describe())
+    if frame_log is not None:
+        # Only when set, as the answer store above: a run recorded without one resumes against its frozen config.
+        info.update(frame_log=frame_log.describe())
     if oracle:
         # No service, no URL, no timeout: the identity says what answered. A perception upper
         # bound is a diagnostic of the method, never a benchmark result -- publishable=False,

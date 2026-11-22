@@ -5,6 +5,38 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-22, the frame log: every RGB frame of an episode kept under its capture pose -- the first piece of the VLM pipeline, `core/planning/object_search/frame_log`)
+- **What it keeps.** `EpisodeFrameLog` holds every RGB frame the room-search policy decides on, named after its step
+  (`step_000137.jpg`), and a lookup dictionary from a frame's name to its `FrameRecord`: the step and the exact
+  capture pose (the observation's `AgentPose` -- x, y, z, yaw, camera pitch, the frame of the map and of the RPT\*
+  node positions). Where the images live is a `FrameStore`: `DiskFrameStore` (one folder per episode, the images
+  beside `frames.jsonl` and `episode.json`; `read_frame_log` reads a folder back) or `MemoryFrameStore` (RAM, dropped
+  per episode). A frame is encoded once, above the store (`FrameCodec`: JPEG quality 95 by default, PNG for
+  lossless), so both stores hold byte-identical images and swapping them changes nothing a reader of the log sees.
+- **Where it attaches.** `RPTSearchPolicy(..., frame_log=None)`: begun at every reset and fed at the top of every
+  decision, before perception. Without one the policy, `RPTSettings` and `configuration()` are what they were.
+  `OBJNAV_FRAME_LOG_DIR=<dir>` turns the disk log on for every dataset entrypoint through the one policy builder
+  (`policy_factory.build_policy`) and is inherited by a campaign's children; the frozen configuration gains
+  `method.frame_log` only then, so recorded runs resume as before; `--agent falcon-yolo` and `stop` refuse the
+  variable instead of ignoring it. N actions log N frames: the frame the last action returns is shown to no policy.
+- **How it fails.** `FrameLogError` is an `ObjNavInternalError`: a frame that cannot be encoded or stored stops the
+  run instead of being scored as a failed episode, and no record exists without its image. An episode logged again
+  (the one a resumed run died in) replaces its own folder; finished episodes are not touched.
+- **Checked.** 85 new tests: the codec, both stores against one contract and the episode log
+  (`frame_log/tests`, 71), the policy feeding it (`tests/test_policy_frame_log.py`, 6), and the policy builder, a
+  whole run through the real runner on the harness's fake building and the failure's attribution
+  (`objnav_benchmark_runtime/tests/test_frame_log_run.py`, 8); twelve planted faults (no feed, a channel swap, an
+  unchecked step order, stale frames kept, a rounded pose, ...) each fail at least one of them. One real MP3D episode
+  (`pLe4wQe7qrG/000000`, software rendering, the stand-in LLM, ground-truth perception), flown with the log and
+  without: 243 actions, 243 frames, every pose equal to the recorder's `trajectory.csv`, and the same actions, poses
+  and row either way -- the frozen configurations differ in `method.frame_log` alone; 111 kB a frame at the median,
+  27 MB for the episode. The existing suites are as they were (object_search 234, objnav and harness 1,287, runtime
+  rig 1,368 passed), one failure included that this change does not touch:
+  `test_doorway_actions::test_peek_evidence_flows_through_classifier_oracle_and_real_rpt_star`.
+- **Not done, on purpose.** Nothing reads the log during an episode yet. Choosing the frames that stand for a
+  frontier cluster, the VLM client and RPT\* over frontier clusters are the next steps
+  (`docs/papers/vlm-search-scoring-20261119`).
+
 ### Changed (2026-11-18, the paper's draft cut to a submission draft: `docs/paper/zson_paper.tex`)
 - **From an audit of the code to a paper** (34 -> 28 pages, pseudocode and figure included; pdfLaTeX of TeX Live 2026:
   no error, no warning, no over- or underfull box; every reference cited). The 32 `\TODO` notes are gone, with the

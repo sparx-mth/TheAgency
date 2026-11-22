@@ -20,6 +20,7 @@ annotations (see "No privileged geometry" below).
                                              multifloor/   spawn-floor guard (default) or the building coordinator
                                              closing/      the target takeover: verify, approach, pitch, STOP
                                              navigation/   the route as the exact actions that walk it (lattice), doorway scrapes, the look-down
+                                             frame_log/    optional: every decided RGB frame kept under its capture pose (disk or RAM)
  NavigationCommand ◄──────────────────────  policy.py     one decision per frame, in world coordinates
 ```
 
@@ -32,7 +33,10 @@ Habitat bridge, the Gibson files and the run CLI live in
 `tests/test_package_boundaries.py` enforces the line, and
 `tests/test_no_privileged_geometry.py` the stricter one behind it: nothing
 under `sparx_agency/core` can reach the simulator's navmesh, its pathfinder
-or ground-truth storey data.
+or ground-truth storey data. A fourth thing may be handed in beside the
+services, and is off unless it is: a [**frame log**](frame_log/README.md)
+(`RPTSearchPolicy(..., frame_log=...)`), which keeps every RGB frame the
+policy decides on under the pose it was captured from.
 
 ## Layout
 
@@ -51,6 +55,7 @@ or ground-truth storey data.
 | `route_memory.py` | the committed-route memory: when a planned path is kept, re-used or released |
 | `navigation/` | the narrow-passage layer (2026-10-28): `kinematic_follower.py` (every committed route walked as the action sequence the discrete-action lattice plans, `core/planning/planners/lattice`), `bottlenecks.py` (doorways and corridors read off the clearance field), `scrape_guard.py` (a refused step in a doorway stays off the map), `doorway_look_down.py` (the camera pitched on the approach); see its README |
 | `baselines/` | `falcon_yolo.py`: goal-free FALCON + the same perception and closing, no LLM (`--agent falcon-yolo`) |
+| `frame_log/` | the policy's optional visual memory (2026-11-22), the first piece of the VLM pipeline of `docs/papers/vlm-search-scoring-20261119`: `episode_frame_log.py` (`EpisodeFrameLog`: begun at every reset, fed at the top of every decision with the observation's RGB frame, its step and its pose; `records` is the lookup dictionary from a frame's file name to its capture pose, `rgb(name)` the image), `interfaces.py` (`FrameRecord`, the `FrameStore` protocol, `FrameLogError` -- an `ObjNavInternalError`, so a frame that cannot be kept stops a run instead of being scored as a failed episode), `disk_store.py` (one folder per episode: the images beside `frames.jsonl`; `read_frame_log` reads one back), `memory_store.py` (the same encoded bytes in RAM, dropped per episode), `codec.py` (JPEG quality 95 by default, PNG for lossless). Handed to the policy at construction and off without it; `OBJNAV_FRAME_LOG_DIR=<dir>` turns the disk log on for a benchmark run. It keeps frames and changes no decision: nothing reads it back during an episode yet. See its README |
 | `tests/` | the package's contract tests: boundaries, a service-free smoke run, the failure contract; see below |
 
 What the method shares with the rest of `core` it imports from there rather

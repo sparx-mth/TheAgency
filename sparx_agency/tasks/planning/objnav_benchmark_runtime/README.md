@@ -2782,6 +2782,48 @@ and camera-pitch handling. Replay interpolates translation/pitch and the shortes
 yaw arc, includes the final pose, preserves aspect ratio, and writes only a
 separate `smooth_rgb.mp4`. It does not alter original scores or observations.
 
+### The camera's own frames: `OBJNAV_FRAME_LOG_DIR` (since 2026-11-22)
+
+A recording holds the dashboard, never the frames the agent was shown.
+`OBJNAV_FRAME_LOG_DIR=<dir>` keeps those: every RGB frame the room-search
+policy decides on, as `<dir>/<episode>/step_<6 digits>.jpg`, beside
+`frames.jsonl` -- one line per image: its file name, its step and the exact
+pose it was captured from (`x`, `y`, `z`, `yaw`, `camera_pitch`: the numbers of
+`trajectory.csv`) -- and `episode.json` (the episode, its target, the image
+format, the camera, the pose convention). The episode's folder is its id made
+readable and then the `recordings/<key>` key, so a recording and its frames
+are found together.
+
+```bash
+OBJNAV_FRAME_LOG_DIR=~/objnav_benchmark/frames/<run> mp3d/run_benchmark.sh ...      # one directory per run
+```
+
+It is the policy's own log, the first piece of the VLM pipeline
+(`core/planning/object_search/frame_log`; its README is the authority, and
+`docs/papers/vlm-search-scoring-20261119` says what it is for), switched on
+by the one policy builder for every dataset entrypoint and inherited by a
+campaign's children. `--record` is not needed for it and does not change it.
+What follows from that:
+
+- **N actions, N frames.** Steps 0 to N-1; the frame the last action returns
+  is shown to no policy and is not logged (its pose is `trajectory.csv`'s
+  last row).
+- **Only `--agent rpt` keeps one**; with `falcon-yolo` or `stop` the variable
+  is refused at start-up, not ignored.
+- **The frozen configuration gains `method.frame_log` only when the variable
+  is set**, so earlier runs resume as they were; a run started with it is
+  resumed with it.
+- **A frame that cannot be stored stops the run** (`FrameLogError`, an
+  `ObjNavInternalError`): a full disk is never scored as a failed episode.
+- **One directory per run** (inside the run's output directory is fine). An
+  episode logged again -- the one a resumed run died in -- replaces its own
+  folder; finished episodes are left as they were, and two runs sharing a
+  directory overwrite each other's episodes.
+- **It costs disk, not decisions**: 111 kB a frame at the median and 27 MB
+  for a 243-action MP3D episode (JPEG quality 95, 640 x 480, measured
+  2026-11-22) -- extrapolated from that one episode, tens of gigabytes for a
+  full split.
+
 ## Dependencies and validation
 
 `requirements.txt` lists the shared CPU/scientific extras; an adapter adds its

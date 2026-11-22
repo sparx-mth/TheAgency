@@ -84,17 +84,18 @@ def episode(actions=None, metadata=None) -> ObjNavEpisode:
                          actions or body_actions(), 500, metadata=dict(metadata or {}))
 
 
-def make_policy(detector=None, llm=None, actions=None, warmed_up=True, **overrides):
+def make_policy(detector=None, llm=None, actions=None, warmed_up=True, frame_log=None, **overrides):
     """A reset policy on a 20 m synthetic map; ``overrides`` are ``RPTSettings`` fields.
 
     With ``warmed_up`` (the default) the mandatory warm-up rotation is marked
     done and the spawn room needs no discovery peek, so the first ``plan``
     reaches the room reasoning; ``warmed_up=False`` starts the episode as the
-    benchmark does, with the look-around.
+    benchmark does, with the look-around. ``frame_log`` is handed to the
+    policy as it is (``frame_log/``); None, the default, keeps no frames.
     """
     overrides.setdefault("doorway_peek", {"enabled": False})
     settings = RPTSettings(**dict({"map_size_m": 20.0}, **overrides))
-    policy = RPTSearchPolicy(detector or FakeDetector(), llm or FakeLLM(), settings)
+    policy = RPTSearchPolicy(detector or FakeDetector(), llm or FakeLLM(), settings, frame_log=frame_log)
     ep = episode(actions)
     policy.reset(ep, gibson_label_mapper().target_labels("chair"))
     if warmed_up:
