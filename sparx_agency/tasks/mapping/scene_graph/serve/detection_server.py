@@ -55,6 +55,7 @@ class _ServerContext:
         self.model_name = model_name
         self.device = device
         self.classes: List[str] = list(classes)
+        self.active_classes = list(classes)
         self.metadata = dict(metadata or {})
         self.frames_served = 0
         self.lock = threading.Lock()
@@ -102,12 +103,12 @@ class _DetectionHandler(BaseHTTPRequestHandler):
         with ctx.lock:
             payload = {"ok": True, "model": ctx.model_name, "device": ctx.device,
                        "classes": list(ctx.classes), "metadata": dict(ctx.metadata),
-                       "frames_served": ctx.frames_served}
+                       "frames_served": ctx.frames_served, "scoped_prompts": ctx.metadata.get("backend") == "yolo_world"}
         self._send_json(payload)
 
     def do_POST(self) -> None:  # noqa: N802 - http.server API
         try:
-            if self.path == "/detect":
+            if self.path in ("/detect", "/detect/scoped"):
                 self._handle_detect()
             elif self.path == "/set_classes":
                 self._handle_set_classes()
@@ -127,8 +128,23 @@ class _DetectionHandler(BaseHTTPRequestHandler):
         rgb = np.ascontiguousarray(bgr[:, :, ::-1])
         t0 = time.perf_counter()
         with ctx.lock:
-            dets = ctx.detector.detect(rgb)
             classes = list(ctx.classes)
+            scoped = self.path == "/detect/scoped"
+            if scoped:
+                if ctx.metadata.get("backend") != "yolo_world":
+                    raise ValueError("Request-scoped prediction requires YOLO-World")
+                classes = json.loads(self.headers.get("X-Detection-Classes", "null"))
+                if (not isinstance(classes, list) or not classes or
+                        any(not isinstance(c, str) or c not in ctx.classes for c in classes)
+                        or len(set(classes)) != len(classes)):
+                    raise ValueError("Expected a nonempty, unique subset of the configured vocabulary")
+            # The prompt selection, forward pass and class echo are one transaction. Another episode
+            # (or a fixed-vocabulary client) cannot change the meaning of a class index mid-frame.
+            if classes != ctx.active_classes:
+                ctx.detector.set_prompts(classes)
+                ctx.active_classes = list(classes)
+            dets = ctx.detector.detect(rgb)
+            default_classes = list(ctx.classes)
             metadata = dict(ctx.metadata)
             diagnostics = (deepcopy(ctx.detector.diagnostics())
                            if hasattr(ctx.detector, "diagnostics") else {})
@@ -138,6 +154,7 @@ class _DetectionHandler(BaseHTTPRequestHandler):
             "ms": float((time.perf_counter() - t0) * 1000.0),
             "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0,
             "classes": classes, "metadata": metadata,
+            **({"server_classes": default_classes} if scoped else {}),
             "detections": detections_to_json(_wire_from_core(dets)),
             "diagnostics": diagnostics,
             "request_sha256": hashlib.sha256(body).hexdigest(),
@@ -158,6 +175,7 @@ class _DetectionHandler(BaseHTTPRequestHandler):
         with ctx.lock:                                 # never mid-detect
             ctx.detector.set_prompts(cleaned)          # re-prompts a loaded model
             ctx.classes = cleaned
+            ctx.active_classes = list(cleaned)
             ctx.metadata = refresh_vocabulary_metadata(ctx.detector, ctx.metadata)
         print("%s vocabulary set to %d classes" % (_TAG, len(cleaned)))
         self._send_json({"ok": True, "classes": cleaned})

@@ -23,7 +23,7 @@ from sparx_agency.core.planning.objnav.labels.datasets.mp3d import mp3d_label_ma
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import (
     PERCEPTION_GROUND_TRUTH, add_detector_options)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import (  # noqa: F401  (StopDiagnostic re-exported for the sibling CLIs)
-    AGENT_CHOICES, AGENT_HELP, StopDiagnostic, build_policy)
+    AGENT_CHOICES, AGENT_HELP, StopDiagnostic, build_policy, detector_vocabulary)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (
     episodes_of_category, explicit_episodes, gpu_plan_record, select_episodes)
 # Everything below the dataset is the Habitat benchmark family's, not MP3D's: the method's defaults, the
@@ -62,9 +62,7 @@ def parser():
     p.add_argument("--policy-config", type=Path,
                    help="JSON object of RPTSettings overrides")
     p.add_argument("--explorer", choices=("frontier", "falcon"), default=None,
-                   help="Local exploration inside a room: the observed-map frontier "
-                        "sweep (default) or the planar FALCON adaptation. Must agree "
-                        "with local_exploration in --policy-config when both are given")
+                   help="rpt uses frontier; rpt_room_llm supports frontier or falcon; falcon-yolo uses falcon")
     # The detector and the (off by default) segmenter: the same switches as gibson.run
     # and hm3d.run, so a campaign forwards one set of perception flags to any benchmark.
     add_detector_options(p, url_default=DEFAULT_DETECTOR_URL)
@@ -258,7 +256,8 @@ def prepare(args):
                 if not annotation_issues:
                     from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.mp3d_categories import MP3D_TABLE
                     from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.source import GroundTruthSource
-                    ground_truth = GroundTruthSource(mp3d_label_mapper(), MP3D_TABLE)
+                    mapper = mp3d_label_mapper()
+                    ground_truth = GroundTruthSource(mapper, MP3D_TABLE, vocabulary=detector_vocabulary(args.agent, mapper))
             if not oracle or ground_truth is not None:
                 # habitat-sim matches gpu_device_id against the EGL devices' CUDA ids; -1 skips the match
                 # and takes EGL device 0, which the software-render launch makes Mesa's llvmpipe.

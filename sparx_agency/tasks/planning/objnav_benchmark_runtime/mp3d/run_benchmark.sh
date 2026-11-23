@@ -62,7 +62,7 @@
 #                        own geodesic (99% within 1 mm, or the scene refuses to run: the navmesh check)   default 1
 #   EXCLUDE_UNREACHABLE  1: drop, and record, an episode whose goal view points are unreachable instead of stopping   default 0
 #   SPLIT                val (the benchmark); train / val_mini are development splits and are labelled subsets   default val
-#   OLLAMA_NUM_PARALLEL  requests a native Ollama serves at once; --jobs N defaults it to ceil(N/2) (and budgets N
+#   OLLAMA_NUM_PARALLEL  requests a native Ollama serves at once (default 1, independent of the number of
 #                        renderers in the GPU plan) unless set here; each slot is its own KV cache          default 1
 #   HABITAT_VRAM_MIB     one habitat-sim renderer's VRAM, for the GPU plan and --jobs max (gpu_plan.py's default is
 #                        1536; --jobs max sizes at 1000 unless set) and the sharded pool's start gate (1400 unset).
@@ -75,7 +75,6 @@ usage() { sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${OBJNAV_REPO:-$(cd -- "$HERE/../../../../.." && pwd)}"
 DETECTOR_PORT="${DETECTOR_PORT:-18093}"            # before the shared defaults: MP3D's own port, see above
-OPERATOR_OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-}"      # the operator's word, before the library's default of 1
 source "$HERE/../benchmark_services.sh"
 objnav_services_defaults
 # The shared default names ~/miniconda3/envs/habitat; this workstation's habitat-sim 0.2.4 environment is objnav-habitat.
@@ -203,10 +202,8 @@ fi
   || die "--llm-servers N deals shards over native servers the launcher starts: it needs --shard-episodes and OLLAMA_MODE=native"
 [[ -z "$JOBS_FILE" || -n "$SHARD_EPISODES" ]] || die "--jobs-file sizes a sharded campaign's pool: it needs --shard-episodes"
 if [[ "$JOBS" -gt 1 ]]; then
-  # As hm3d/run_benchmark.sh: the GPU plan budgets one renderer per child, and the native Ollama gets ceil(N/2)
-  # request slots unless the operator named a number (the node oracle is about a third of a child's wall time).
+  # Each child owns a renderer; the VLM server and its fixed request slots are shared.
   HABITAT_RENDERERS="$JOBS"
-  [[ -n "$OPERATOR_OLLAMA_NUM_PARALLEL" ]] || OLLAMA_NUM_PARALLEL=$(( (JOBS + 1) / 2 ))
 fi
 if [[ -z "$OUTPUT" ]]; then
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -349,19 +346,19 @@ if [[ -n "$SHARD_EPISODES" ]]; then
       say "starting ollama $((k + 1)) of $LLM_SERVERS at $URL ($OLLAMA_NUM_PARALLEL request slot(s), default context $OLLAMA_CONTEXT_LENGTH)" | tee -a "$LOG"
       CUDA_VISIBLE_DEVICES="$OLLAMA_CUDA_VISIBLE_DEVICES" OLLAMA_HOST="${URL#http://}" OLLAMA_MODELS="$OLLAMA_MODELS_DIR" \
         OLLAMA_NUM_PARALLEL="$OLLAMA_NUM_PARALLEL" OLLAMA_CONTEXT_LENGTH="$OLLAMA_CONTEXT_LENGTH" \
-        OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=30m ollama serve > "$SERVICE_DIR/ollama_$PORT.log" 2>&1 &
+        OLLAMA_KEEP_ALIVE="$LLM_KEEP_ALIVE" ollama serve > "$SERVICE_DIR/ollama_$PORT.log" 2>&1 &
       EXTRA_OLLAMA_PIDS+=($!)
       objnav_wait_for_url "$URL/api/tags" 120 "Ollama at $URL"
     fi
     LLM_URLS+=("$URL")
   done
   CAMPAIGN_ARGS+=(--llm-urls "${LLM_URLS[@]}")
-  if [[ "$AGENT" != falcon-yolo && "$LLM_MODEL" == "$LLM_REASONING_MODEL" ]]; then
+  if [[ "$AGENT" == rpt && "$LLM_BACKEND" == ollama ]]; then
     for URL in "${LLM_URLS[@]}"; do
-      curl -fsS --max-time 300 "$URL/api/chat" -d "{\"model\": \"$LLM_MODEL\", \"stream\": false, \"keep_alive\": \"$LLM_KEEP_ALIVE\", \"messages\": [{\"role\": \"user\", \"content\": \"Reply OK.\"}], \"options\": {\"num_ctx\": ${LLM_NUM_CTX:-$LLM_REASONING_NUM_CTX}, \"num_predict\": 2}}" > /dev/null \
+      curl -fsS --max-time 300 "$URL/api/chat" -d "{\"model\": \"$LLM_MODEL\", \"stream\": false, \"keep_alive\": \"$LLM_KEEP_ALIVE\", \"messages\": [], \"options\": {\"num_ctx\": $LLM_NUM_CTX, \"num_batch\": $LLM_NUM_BATCH}}" > /dev/null \
         || die "the LLM server at $URL did not answer a warm-up request"
     done
-    say "LLM servers warm: ${LLM_URLS[*]} ($LLM_MODEL at a ${LLM_NUM_CTX:-$LLM_REASONING_NUM_CTX}-token window)" | tee -a "$LOG"
+    say "VLM servers warm: ${LLM_URLS[*]} ($LLM_MODEL at a $LLM_NUM_CTX-token window)" | tee -a "$LOG"
   fi
 fi
 # The EXIT trap (benchmark_services.sh) calls this before the services go down: the campaign stops its shards first.

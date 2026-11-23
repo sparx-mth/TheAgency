@@ -90,13 +90,15 @@ class GroundTruthDetector:
     ground_truth_semantics = True
 
     def __init__(self, source: GroundTruthSource, min_pixels: int = DEFAULT_MIN_PIXELS,
-                 on_object_m: float = DEFAULT_ON_OBJECT_M):
+                 on_object_m: float = DEFAULT_ON_OBJECT_M, *, episode_scoped=False):
         if type(min_pixels) is not int or min_pixels < 1:
             raise ValueError("min_pixels must be a positive integer, got %r" % (min_pixels,))
         if isinstance(on_object_m, bool) or not math.isfinite(float(on_object_m)) or float(on_object_m) < 0.0:
             raise ValueError("on_object_m must be finite and non-negative (0 disables the filter), got %r" % (on_object_m,))
         self.source = source
         self.vocabulary = tuple(source.vocabulary)
+        self.episode_scoped = episode_scoped
+        self._prompts = None
         self.min_pixels = min_pixels
         self.on_object_m = float(on_object_m)
         #: ``instance -> HxW bool`` of the last frame's on-box pixels, for the segmenter (filter on only).
@@ -126,14 +128,23 @@ class GroundTruthDetector:
                                                  "on_object_m": self.on_object_m,
                                                  "label_table": self.source.label_mapper.name}}}
 
+    def set_episode_prompts(self, prompts):
+        self.episode_scoped = True
+        self._prompts = frozenset(prompts)
+
     def detect(self, rgb: np.ndarray) -> List[Detection]:
         """Detections for one ``HxWx3`` RGB frame -- the simulator's current one, or the run ends."""
         started = time.monotonic()
         self.last_detections, self.last_diagnostics, self.last_instances_by_box = (), {}, {}
         self.last_consistent = {}
         ids = self.source.lookup(rgb)
-        extents = instance_extents(ids, min_pixels=1)
         labels = self.source.labels
+        include = None
+        if self.episode_scoped:
+            if not self._prompts:
+                raise ObjNavInternalError("Target-scoped GT detector used before episode reset")
+            include = {i for i, label in labels.items() if label in self._prompts}
+        extents = instance_extents(ids, min_pixels=1, include=include)
         points = self._world_points(ids) if self.on_object_m > 0.0 else None
         detections, by_box, below_floor, off_object, trimmed, unjudged = [], {}, 0, 0, 0, 0
         for instance, extent in extents.items():

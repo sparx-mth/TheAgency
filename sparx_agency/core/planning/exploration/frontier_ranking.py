@@ -167,6 +167,8 @@ def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None, 
     a disconnected wall is rejected rather than credited to an unseen room.
 
     Args:
+        room_labels: Optional room ownership grid. None builds a floor-wide
+            inventory without assigning any frontier to a room.
         preferred_cost: Optional cost array at the planner's PREFERRED
             standoff (``WeightedAStarPlanner2D.cost_for``), beside ``cost``
             at the body radius. A* plans at the preferred standoff and
@@ -186,8 +188,8 @@ def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None, 
     """
     params = replace(params or FrontierRankingParams(),
                      max_geodesic_m=max(1.0, world.grid.size * world.resolution * math.sqrt(2.0)))
-    labels = np.asarray(room_labels)
-    if labels.shape != world.grid.shape:
+    labels = np.asarray(room_labels) if room_labels is not None else None
+    if labels is not None and labels.shape != world.grid.shape:
         raise ValueError("Room labels must match the occupancy grid")
     distances = np.full(world.grid.shape, np.inf, dtype=float)
     cells = np.zeros(world.grid.shape, dtype=bool)
@@ -230,7 +232,7 @@ def accessible_frontiers(world, cost, room_labels, origin_xy, yaw, params=None, 
         goals.append(goal)
         kept[id(goal)] = cluster
         cells[cluster.rows, cluster.cols] = True
-        room = _room_of(labels, cluster)
+        room = _room_of(labels, cluster) if labels is not None else None
         if room is not None:
             by_room.setdefault(room, []).append(goal)
     goals.sort(key=lambda g: (-g.utility, g.geodesic_m))
@@ -506,4 +508,3 @@ def _rank_by_distance(world, clusters: Sequence[FrontierCluster], distances: np.
                                   utility=float(utility)))
     goals.sort(key=lambda g: (-g.utility, g.geodesic_m))
     return goals
-

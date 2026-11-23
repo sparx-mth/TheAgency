@@ -58,7 +58,9 @@ def test_the_client_stands_where_the_verified_client_does_and_names_itself():
 def test_install_replaces_the_runtimes_client_and_main_refuses_an_unknown_benchmark(monkeypatch, capsys):
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.services import llm as service
     monkeypatch.setattr(service, "VerifiedLLMClient", service.VerifiedLLMClient)      # restored after the test
+    monkeypatch.setattr(service, "VerifiedRoomClient", service.VerifiedRoomClient)
     assert stub_llm.install() is service and service.VerifiedLLMClient is StubLLMClient
+    assert service.VerifiedRoomClient is StubLLMClient
     assert stub_llm.main(["habitat"]) == 2 and "usage" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         stub_llm.main(["mp3d", "--no-such-flag"])

@@ -26,7 +26,7 @@
 # Habitat third; whatever does not fit runs on the CPU (GPU_PLAN=off restores CPU services). An operator
 # pin overrides the budget per process: GPU_PLAN_LLM / GPU_PLAN_YOLO / GPU_PLAN_HABITAT = auto | gpu | cpu
 # (GPU_PLAN_LLM=gpu GPU_PLAN_HABITAT=cpu: the LLM on the card, software rendering, YOLO where the VRAM allows).
-# --parallel N budgets N renderers and gives the native Ollama ceil(N/2) request slots (OLLAMA_NUM_PARALLEL
+# --parallel N budgets N renderers sharing one native Ollama request slot (OLLAMA_NUM_PARALLEL
 # overrides), since the node oracle is about a third of a shard's wall time and the slots batch on the card.
 # Everything else is read from the environment, with defaults for the development laptop;
 # see BENCHMARK.md beside this file for the full list and what each one is for.
@@ -39,7 +39,6 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${OBJNAV_REPO:-$(cd -- "$HERE/../../../../.." && pwd)}"
 # The services, their ports, the models, the LLM and the GPU plan are the shared launcher library's defaults;
 # only what is Gibson -- its episodes and scenes -- is set here (after DATA, which the library defines).
-OPERATOR_OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-}"      # the operator's word, before the library's default of 1
 source "$HERE/../benchmark_services.sh"
 objnav_services_defaults
 GIBSON_EPISODES_DIR="${GIBSON_EPISODES_DIR:-$DATA/objectnav/gibson/objectnav/gibson/v1.1/val}"
@@ -85,7 +84,6 @@ if [[ -n "$PARALLEL" ]]; then
   [[ "$PARALLEL" =~ ^[0-9]+$ && "$PARALLEL" -ge 2 ]] || die "--parallel needs an integer of at least 2, got '$PARALLEL'"
   [[ -z "$FIVE_SCENE$SCENE$LIMIT$CATEGORY" ]] || die "--parallel runs the full published split only (no --five-scene, --scene, --limit or --category)"
   HABITAT_RENDERERS="$PARALLEL"
-  [[ -n "$OPERATOR_OLLAMA_NUM_PARALLEL" ]] || OLLAMA_NUM_PARALLEL=$(( (PARALLEL + 1) / 2 ))
 fi
 if [[ -z "$OUTPUT" ]]; then
   STAMP="$(date -u +%Y%m%dT%H%M%SZ)"

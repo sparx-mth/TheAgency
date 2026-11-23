@@ -13,7 +13,7 @@ from sparx_agency.core.planning.objnav.types.observation import ObjNavObservatio
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.contract import DetectionWire
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
-from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy, RPTSettings
+from sparx_agency.core.planning.object_search.policy import LegacyRoomSearchPolicy, RPTSettings
 
 #: The published four-action set. The component fixtures below isolate the room and target
 #: machinery on it; the benchmark protocol itself carries the LOOK pair (``camera_tilt``), and the
@@ -33,6 +33,8 @@ class FakeLLM:
         self.reasoning_calls = 0
 
     def chat_json(self, system, user, **kwargs):
+        if "image_jpeg" in kwargs:
+            return {"probability": 0.6}
         if kwargs.get("reasoning"):
             self.reasoning_calls += 1
         if "Room observed objects" in user:
@@ -64,8 +66,9 @@ def setup_policy(label="chair", duplicate=False, llm=None, **overrides):
     camera = PROTOCOL.camera()
     episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", "chair",
                             camera, BODY_ACTIONS_PROTOCOL.actions(), 500)
-    policy = RPTSearchPolicy(FakeDetector(label, duplicate), llm or FakeLLM(),
-                             RPTSettings(**dict({"map_size_m": 20.0}, **overrides)), segmenter=segmenter)
+    # Reference rig for the room-loop and FALCON component regressions, not the live policy builder.
+    policy = LegacyRoomSearchPolicy(FakeDetector(label, duplicate), llm or FakeLLM(),
+                                    RPTSettings(**dict({"map_size_m": 20.0}, **overrides)), segmenter=segmenter)
     policy.reset(episode, gibson_label_mapper().target_labels("chair"))
     if not discovery:
         policy.warmup_actions = policy.settings.warmup_steps  # this fixture isolates the existing room/target components
@@ -184,5 +187,4 @@ def test_observed_mapping_reaches_llm_rpt_and_astar():
     assert policy.graph.queries == 1
     assert policy.solver.calls == 1
     assert policy.supervisor.stats["selections"] == 1
-
 

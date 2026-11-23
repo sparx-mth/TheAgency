@@ -345,6 +345,15 @@ class RPTSettings:
             if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
                 raise ValueError("%s must be a JSON object of setting overrides" % name)
 
+    def validate_frontier_method(self):
+        """Reject settings for a different experiment rather than quietly ignoring them on a visual run."""
+        if self.local_exploration != "frontier":
+            raise ValueError("rpt uses VLM-scored frontiers; choose rpt_room_llm or falcon-yolo for FALCON")
+        if self.room_labels or self.room_search or self.doorway_peek.enabled or self.doorway_peek.gate_floor_departure:
+            raise ValueError("room options and doorway peeks require --agent rpt_room_llm")
+        if self.allow_stair_traversal:
+            raise ValueError("--agent rpt avoids stairs; allow_stair_traversal requires a different agent")
+
     def planner_params(self) -> WeightedAStarParams:
         """The route planner as these settings configure it -- the one definition the policy and every replay of it share.
 

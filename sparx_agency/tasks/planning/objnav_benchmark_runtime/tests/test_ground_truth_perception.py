@@ -349,6 +349,7 @@ def test_the_segmenter_refuses_a_frame_the_detector_has_not_read_and_the_detecto
 # ── the method consumes the oracle unchanged ─────────────────────────────────
 
 def test_the_perception_cycle_takes_the_oracles_boxes_and_masks_as_it_takes_the_services():
+    from sparx_agency.core.planning.object_search.policy import LegacyRoomSearchPolicy
     source = source_with({2: "chair", 4: "door"}, {"chair": frozenset({2})})
     camera = HM3D_V1.camera()
     k = camera.intrinsics
@@ -359,7 +360,7 @@ def test_the_perception_cycle_takes_the_oracles_boxes_and_masks_as_it_takes_the_
     source.publish(rgb, ids)
     detector = GroundTruthDetector(source)
     settings = RPTSettings(map_size_m=20.0, segmentation=True, doorway_peek={"enabled": False})
-    policy = RPTSearchPolicy(detector, FakeLLM(), settings, segmenter=GroundTruthSegmenter(detector))
+    policy = LegacyRoomSearchPolicy(detector, FakeLLM(), settings, segmenter=GroundTruthSegmenter(detector))
     episode = ObjNavEpisode("synthetic/0", "synthetic", "hm3d_v1", "val", "chair", camera, HM3D_V1.actions(), 500)
     policy.reset(episode, MAPPER.target_labels("chair"))
     depth = np.full(ids.shape, 3.0, np.float32)
@@ -373,6 +374,19 @@ def test_the_perception_cycle_takes_the_oracles_boxes_and_masks_as_it_takes_the_
     assert detection.cls == "chair" and int(mask.sum()) == 80 * 80
     assert cycle.segmenter_evidence["boxes"] == 1 and cycle.counts["segmented_frames"] == 1
     assert cycle.counts["detector_failures"] == 0 and cycle.counts["segmenter_failures"] == 0
+
+
+def test_scoped_gt_measures_only_goal_aliases_and_stairs_and_switches_on_reset():
+    from sparx_agency.core.planning.object_search.perception.target_prompts import target_stair_prompts
+    source = source_with({2: "chair", 3: "bed", 4: "door", 5: "stairs"}, {"chair": {2}, "bed": {3}})
+    ids = np.repeat(np.arange(2, 6, dtype=np.int32), 64).reshape(16, 16)
+    rgb = rgb_for(ids)
+    source.publish(rgb, ids)
+    d = GroundTruthDetector(source, episode_scoped=True)
+    for category, expected in (("chair", {2, 5}), ("bed", {3, 5})):
+        d.set_episode_prompts(target_stair_prompts(MAPPER.target_labels(category)))
+        assert {b.cls for b in d.detect(rgb)} == {category, "stairs"}
+        assert set(d.last_instances_by_box.values()) == expected
 
 
 # ── the dataset and the assets ───────────────────────────────────────────────
@@ -591,37 +605,22 @@ def test_a_ground_truth_run_is_recorded_as_one_by_the_method_itself(agent, monke
     json.dumps(policy.configuration())
 
 
-def test_the_run_record_names_the_oracles_model_beside_the_prompt_version_it_was_asked_under(monkeypatch, capsys):
-    """A wording is tuned per model: the record carries the model that answered the node oracle, the prompt version,
-    the model that version was tuned on and whether the two agree; a mismatch is said once at start-up."""
-    from sparx_agency.core.mapping.topology.search_node_prompts import DEFAULT_PROMPT, PROMPTS
+def test_the_run_record_names_the_visual_model_and_not_the_retired_room_oracle(monkeypatch):
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.services import llm
 
-    def verified(reasoning_model):
-        class Verified(FakeLLM):
-            def __init__(self, client):
-                super().__init__()
+    class Verified(FakeLLM):
+        def __init__(self, client):
+            super().__init__()
 
-            def health(self):
-                return {"model": "label-model", "reasoning_model": reasoning_model, "digest": "0",
-                        "models": {reasoning_model: {"digest": "sha256:abc"}, "label-model": {"digest": "0"}}}
-        return Verified
+        def health(self):
+            return {"model": "vision-model", "digest": "sha256:abc"}
 
-    tuned_on = PROMPTS[DEFAULT_PROMPT].tuned_on
-    monkeypatch.setattr(llm, "VerifiedLLMClient", verified(tuned_on))
+    monkeypatch.setattr(llm, "VerifiedLLMClient", Verified)
     _, method = build_policy(arguments(agent="rpt"), MAPPER, ground_truth=source_with({2: "chair"}))
-    oracle = method["node_oracle"]
-    assert oracle["prompt"] == PROMPTS[DEFAULT_PROMPT].describe() and oracle["prompt"]["version"] == DEFAULT_PROMPT
-    assert oracle["model"] == {"name": tuned_on, "digest": "sha256:abc", "prompt_tuned_on_it": True}
-    assert "node oracle" not in capsys.readouterr().err, "the model the version was tuned on: nothing to say"
-    monkeypatch.setattr(llm, "VerifiedLLMClient", verified("some-larger-model"))
-    _, method = build_policy(arguments(agent="rpt"), MAPPER, ground_truth=source_with({2: "chair"}))
-    assert method["node_oracle"]["model"] == {"name": "some-larger-model", "digest": "sha256:abc",
-                                              "prompt_tuned_on_it": False}
-    said = capsys.readouterr().err
-    assert "some-larger-model is asked under prompt version %r, which was tuned on %s" % (DEFAULT_PROMPT, tuned_on) in said
+    assert method["frontier_search"]["model"] == "vision-model" and method["llm_identity"]["digest"] == "sha256:abc"
+    assert method["frontier_search"]["prompt"] and "node_oracle" not in method
     _, baseline = build_policy(arguments(agent="falcon-yolo"), MAPPER, ground_truth=source_with({2: "chair"}))
-    assert "node_oracle" not in baseline or "model" not in (baseline.get("node_oracle") or {}), "no oracle, no model"
+    assert "frontier_search" not in baseline, "no VLM in the baseline"
     json.dumps(method)
 
 

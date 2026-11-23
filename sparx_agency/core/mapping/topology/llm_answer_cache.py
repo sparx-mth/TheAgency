@@ -55,13 +55,14 @@ REPLAY_ENV = "LLM_ANSWERS_REPLAY"
 
 def request_key(backend: str, model: str, system: str, user: str, temperature: float, seed: Optional[int],
                 num_ctx: Optional[int], max_tokens: int, response_format: str = "json",
-                scope: Optional[str] = None) -> str:
+                scope: Optional[str] = None, image_sha256: Optional[str] = None) -> str:
     """SHA-256 of the scope and the request's answer-shaping fields, canonically serialised."""
-    canonical = json.dumps({"scope": scope, "backend": backend, "model": model, "system": system, "user": user,
-                            "temperature": float(temperature), "seed": seed,
-                            "num_ctx": None if num_ctx is None else int(num_ctx), "max_tokens": int(max_tokens),
-                            "format": response_format},
-                           sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    fields = {"scope": scope, "backend": backend, "model": model, "system": system, "user": user,
+              "temperature": float(temperature), "seed": seed, "num_ctx": None if num_ctx is None else int(num_ctx),
+              "max_tokens": int(max_tokens), "format": response_format}
+    if image_sha256 is not None:         # keep historical text-only replay keys unchanged
+        fields["image_sha256"] = image_sha256
+    canonical = json.dumps(fields, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -119,7 +120,7 @@ class LLMAnswerStore:
         return {"schema": SCHEMA, "record": None if self.record_dir is None else str(self.record_dir),
                 "replay": [str(d) for d in self.replay_dirs],
                 "key": "sha256 of the episode scope, backend, model, system, user, temperature, seed, num_ctx, "
-                       "max_tokens, format"}
+                       "max_tokens, format; image-bearing requests also include the JPEG sha256"}
 
     def get(self, key: str) -> Optional[str]:
         """The stored answer to ``key``, or None; counts it as replayed, repeated or asked."""

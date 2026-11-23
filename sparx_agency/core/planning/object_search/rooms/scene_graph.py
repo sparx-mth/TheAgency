@@ -417,8 +417,6 @@ class ObservedSceneGraph:
     def refresh_accessibility(self, world, cost, here_xy, yaw=0.0, ranking=None, preferred_cost=None,
                               frontier_world=None):
         """One source of truth for accessible counts, planning goals and map markers."""
-        if self.labels is None:
-            return
         if frontier_world is None:
             frontier_world = self.frontier_world(world)
         self.frontier_inventory = accessible_frontiers(world, cost, self.labels, here_xy, yaw, ranking,

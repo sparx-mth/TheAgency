@@ -276,7 +276,7 @@ launch() {   # stage, run dir, answers dir, jobs, servers, sharded(0/1), extra l
                   LLM_MODEL="$model" LLM_REASONING_MODEL="$model" GPU_PLAN_LLM=gpu LLM_VRAM_MIB="$(stage_llm_vram "$s")"
                   HABITAT_VRAM_MIB="$HABITAT_VRAM_MIB" VRAM_CAP="$VRAM_CAP" OLLAMA_NUM_PARALLEL="$(stage_slots "$s")"
                   LLM_ANSWERS_RECORD="$answers" HAB_PY="$HAB_PY" MP3D_SCENES_DIR="$MP3D_SCENES_DIR")
-  local args=(--version v1 --perception ground-truth --full-records --record-log-only --stall-minutes "$STALL_MINUTES" --output "$r" "$@")
+  local args=(--agent rpt_room_llm --version v1 --perception ground-truth --full-records --record-log-only --stall-minutes "$STALL_MINUTES" --output "$r" "$@")
   if [[ -f "$r/gpu_plan.json" ]] && ls -d "$r"/*/ > /dev/null 2>&1; then
     # A resume keeps the plan the run was frozen with; source_sha256 is accepted only while HEAD is the recorded commit.
     env_args+=(GPU_PLAN_REPLAY="$r/gpu_plan.json")

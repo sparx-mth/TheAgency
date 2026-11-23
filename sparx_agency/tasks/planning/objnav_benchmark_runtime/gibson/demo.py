@@ -166,8 +166,9 @@ class DemoWindow:
                 self.events.put(("message", "Checking CPU-only model services…"))
                 start_ollama()
                 from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
+                from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import detector_vocabulary
                 self.detector_process = start_detector(environment_python("navdp", config["detector_python"]),
-                                                       config["checkpoint"], gibson_label_mapper().vocabulary(), output,
+                                                       config["checkpoint"], detector_vocabulary("rpt", gibson_label_mapper()), output,
                                                        cancelled=self.cancelled)
             if self.cancelled.is_set():
                 return
@@ -277,7 +278,6 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 
 
 

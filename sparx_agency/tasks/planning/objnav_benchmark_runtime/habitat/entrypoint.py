@@ -227,7 +227,8 @@ def run_main(argv, *, benchmark, parser, label_mapper, protocol_for, prepare, wr
     """
     args = parser().parse_args(argv)
     if args.print_vocabulary:
-        print(",".join(label_mapper().vocabulary()))
+        from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import detector_vocabulary
+        print(",".join(detector_vocabulary(args.agent, label_mapper())))
         return 0
     if args.resume and args.output is None:
         parser().error("--resume requires --output")

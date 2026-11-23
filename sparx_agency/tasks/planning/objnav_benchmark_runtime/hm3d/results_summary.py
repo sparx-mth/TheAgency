@@ -37,6 +37,7 @@ from typing import Dict, List, Optional
 
 from sparx_agency.tasks.planning.objnav_benchmark.aggregate import summarise
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import read_episode_rows
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import model_provenance, model_report_rows
 
 DEFAULT_RESULTS_ROOT = Path(__file__).resolve().parent / "results"
 EPISODE_COLUMNS = ("episode_id", "scene_id", "target_category", "success", "spl", "soft_spl", "path_length_m",
@@ -65,18 +66,13 @@ def provenance(root: Path) -> Dict[str, object]:
     run = _json(scenes[0] / "run.json") if scenes else None
     config = (run or {}).get("config") or {}
     method = config.get("method") or {}
-    oracle = method.get("node_oracle") or {}
-    llm = method.get("llm") or {}
     diff = root / "source-changes.diff"
     started, finished = _read(root / "started_utc.txt"), _read(root / "finished_utc.txt")
     return {
         "run_root": str(root),
         "source_commit": _read(root / "source-commit.txt"),
         "source_tree_clean": diff.is_file() and diff.stat().st_size == 0,
-        "llm": {"labels": llm.get("model"), "oracle": llm.get("reasoning_model"), "backend": llm.get("backend"),
-                "temperature": llm.get("temperature"), "seed": llm.get("seed"),
-                "oracle_num_ctx": llm.get("reasoning_num_ctx"), "oracle_max_tokens": llm.get("reasoning_max_tokens")},
-        "node_oracle": {"prompt": oracle.get("prompt"), "model": oracle.get("model")},
+        **model_provenance(method),
         "perception": method.get("perception", "service"),
         "ground_truth": {k: v for k, v in (method.get("ground_truth") or {}).items() if k in ("on_object_m", "min_pixels")},
         "allow_stair_traversal": method.get("allow_stair_traversal"),
@@ -106,19 +102,13 @@ def _group_row(name: str, g) -> str:
 
 
 def markdown(title: str, prov: Dict[str, object], summary, campaign: Optional[dict]) -> str:
-    oracle = prov["node_oracle"]
-    prompt = oracle.get("prompt") or {}
-    model = oracle.get("model") or {}
     complete = campaign.get("complete") if campaign else None
     lines = ["# %s" % title, "",
              "| | |", "|---|---|",
              "| episodes | %d of %s published (%s) |" % (summary.overall.n_episodes, (campaign or {}).get("episodes_published", "?"),
                                                            "complete split" if complete else "INCOMPLETE"),
              "| scenes | %d |" % len(summary.by_scene),
-             "| LLM, room labels | `%s` |" % prov["llm"]["labels"],
-             "| LLM, node oracle | `%s` (Ollama digest `%s`) |" % (prov["llm"]["oracle"], (model.get("digest") or "?")[:19]),
-             "| oracle prompt | version `%s`, digest `%s`, tuned on `%s`; tuned on the model that answered: **%s** |" % (
-                 prompt.get("version"), (prompt.get("sha256") or "?")[:16], prompt.get("tuned_on"), model.get("prompt_tuned_on_it")),
+             *model_report_rows(prov),
              "| perception | %s%s |" % (prov["perception"], (" (on-object %.2f m, min %s px)" % (prov["ground_truth"].get("on_object_m", 0),
                                                                                        prov["ground_truth"].get("min_pixels"))) if prov["ground_truth"] else ""),
              "| stair traversal | %s |" % prov["allow_stair_traversal"],

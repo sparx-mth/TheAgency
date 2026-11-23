@@ -13,7 +13,6 @@ from sparx_agency.core.planning.objnav.camera_geometry import project_to_image
 from sparx_agency.core.planning.object_search.exploration.exploration_fallback import DETECTOR, SEGMENTER
 from sparx_agency.core.planning.object_search.interfaces import (
     RECOVERABLE_DETECTOR_CAUSES, RECOVERABLE_SEGMENTER_CAUSES)
-from sparx_agency.core.planning.object_search.perception.doors import DOOR_LABELS
 from sparx_agency.core.planning.object_search.perception.projection import observed_objects, STAIR_LABELS
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 
@@ -67,7 +66,8 @@ def contradicted_by_map(policy, label, xyz, radius_m=None):
     return landmark
 
 
-class PerceptionCycle:
+class DetectionCycle:
+    """One detector request and, optionally, target masks per observation. No semantic world model."""
     def __init__(self, policy):
         self.policy = policy
         self.step = None
@@ -80,10 +80,6 @@ class PerceptionCycle:
         # two pipelines. A box mapped to None was due a mask the service did not deliver.
         self.masks = None
         self.segmenter_evidence = {}
-        #: Landmarks retracted on clear views without their class (``_count_misses``), for the record.
-        self.retractions = []
-        #: landmark id -> the pose ``(x, y, yaw)`` of its last counted miss: the next must be a distinct viewpoint.
-        self._miss_poses = {}
 
     def observe(self, obs):
         """Exactly one synchronous prediction for this RGB/depth/pose tuple.
@@ -109,7 +105,7 @@ class PerceptionCycle:
             return
         started = time.monotonic()
         try:
-            self.raw = tuple(p.detector.detect(obs.rgb))
+            self.raw = self._detections(p.detector.detect(obs.rgb))
         except Exception as exc:  # the detector service, not this frame's geometry
             if isinstance(exc, ObjNavInternalError) and not isinstance(
                     exc.__cause__, RECOVERABLE_DETECTOR_CAUSES):
@@ -132,6 +128,9 @@ class PerceptionCycle:
             p.building.semantic_stair_hint = any(d.cls in STAIR_LABELS and d.conf >= p.settings.detection_confidence for d in self.raw)
         if p.settings.segmentation:
             self._segment(obs)
+
+    def _detections(self, detections):
+        return tuple(detections)
 
     def _segment(self, obs):
         """One segmenter call for the frame's target boxes; a failure leaves them due a mask they do not get.
@@ -175,7 +174,32 @@ class PerceptionCycle:
         self.counts["segmented_frames"] += 1
         self.counts["segmented_boxes"] += len(targets)
 
+    def diagnostics(self):
+        return {"observation_step": self.step, "counts": dict(self.counts),
+                "projections": list(self.projections), "detector_evidence": self.detector_evidence,
+                "segmenter_evidence": self.segmenter_evidence}
+
+
+class TargetStairCycle(DetectionCycle):
+    """Also enforce the episode contract for in-process detectors; never fuse object landmarks."""
+
+    def _detections(self, detections):
+        p = self.policy
+        return tuple(d for d in detections if p.target.accepts(d.cls) or d.cls in STAIR_LABELS)
+
+
+class PerceptionCycle(DetectionCycle):
+    """Full-vocabulary fusion and target evidence for the original room method."""
+
+    def __init__(self, policy):
+        super().__init__(policy)
+        self.retractions, self._miss_poses = [], {}
+
+    def diagnostics(self):
+        return dict(super().diagnostics(), retractions=list(self.retractions))
+
     def fuse(self, obs):
+        from sparx_agency.core.planning.object_search.perception.doors import DOOR_LABELS
         p = self.policy
         self.observe(obs)
         if obs.step - p._target_step > p.target_settings.max_unseen_steps:
@@ -365,9 +389,3 @@ class PerceptionCycle:
             return "outside_observed_map"
         patch = world.grid[max(0, y-r):y+r+1, max(0, x-r):x+r+1]
         return None if np.count_nonzero(patch == world.values.free) >= 3 else "unobserved_floor_support"
-
-    def diagnostics(self):
-        return {"observation_step": self.step, "counts": dict(self.counts),
-                "projections": list(self.projections), "detector_evidence": self.detector_evidence,
-                "segmenter_evidence": self.segmenter_evidence, "retractions": list(self.retractions)}
-

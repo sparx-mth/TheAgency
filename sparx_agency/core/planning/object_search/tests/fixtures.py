@@ -55,6 +55,8 @@ class FakeLLM:
 
     def chat_json(self, system, user, **kwargs):
         self.calls += 1
+        if "image_jpeg" in kwargs:
+            return {"probability": 0.6}
         if kwargs.get("reasoning"):
             self.reasoning_calls += 1
         if "Room observed objects" in user:
@@ -84,24 +86,23 @@ def episode(actions=None, metadata=None) -> ObjNavEpisode:
                          actions or body_actions(), 500, metadata=dict(metadata or {}))
 
 
-def make_policy(detector=None, llm=None, actions=None, warmed_up=True, frame_log=None, **overrides):
+def make_policy(detector=None, llm=None, actions=None, warmed_up=True, frame_log=None, policy_type=RPTSearchPolicy, **overrides):
     """A reset policy on a 20 m synthetic map; ``overrides`` are ``RPTSettings`` fields.
 
     With ``warmed_up`` (the default) the mandatory warm-up rotation is marked
     done and the spawn room needs no discovery peek, so the first ``plan``
     reaches the room reasoning; ``warmed_up=False`` starts the episode as the
     benchmark does, with the look-around. ``frame_log`` is handed to the
-    policy as it is (``frame_log/``); None, the default, keeps no frames.
+    policy as it is (``frame_log/``); None selects the live RAM default.
     """
     overrides.setdefault("doorway_peek", {"enabled": False})
     settings = RPTSettings(**dict({"map_size_m": 20.0}, **overrides))
-    policy = RPTSearchPolicy(detector or FakeDetector(), llm or FakeLLM(), settings, frame_log=frame_log)
+    policy = policy_type(detector or FakeDetector(), llm or FakeLLM(), settings, frame_log=frame_log)
     ep = episode(actions)
     policy.reset(ep, gibson_label_mapper().target_labels("chair"))
     if warmed_up:
         policy.warmup_actions = policy.settings.warmup_steps
         policy._warmup_pending = False
-        policy.peek.floor_ready = lambda: True
     return policy, ep
 
 

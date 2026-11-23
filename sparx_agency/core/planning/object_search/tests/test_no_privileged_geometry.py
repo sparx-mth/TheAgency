@@ -437,7 +437,7 @@ class Untouchable:
 def _policies(episode_of):
     """The full method (stairs forbidden and allowed) and the FALCON + YOLO baseline, each reset on its own episode."""
     from sparx_agency.core.planning.object_search.baselines.falcon_yolo import FalconYoloBaseline
-    from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy
+    from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy, LegacyRoomSearchPolicy
     from sparx_agency.core.planning.object_search.settings import RPTSettings
     from sparx_agency.core.planning.object_search.tests.fixtures import FakeDetector, FakeLLM
     from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
@@ -447,7 +447,7 @@ def _policies(episode_of):
 
     builders = {
         "rpt": lambda: RPTSearchPolicy(FakeDetector("bed"), FakeLLM(), settings()),
-        "rpt-stairs-allowed": lambda: RPTSearchPolicy(FakeDetector("bed"), FakeLLM(), settings(allow_stair_traversal=True)),
+        "rpt-stairs-allowed": lambda: LegacyRoomSearchPolicy(FakeDetector("bed"), FakeLLM(), settings(allow_stair_traversal=True)),
         "falcon-yolo": lambda: FalconYoloBaseline(FakeDetector("bed"), settings()),
     }
     for name, build in builders.items():

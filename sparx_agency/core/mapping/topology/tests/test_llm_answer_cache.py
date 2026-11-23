@@ -83,6 +83,28 @@ def test_the_two_routes_are_keyed_apart(tmp_path):
     assert client.chat_json("s", "u", reasoning=True) == {"r": "big"}
 
 
+def test_replay_keys_the_boxed_pixels_and_persists_only_their_digest(tmp_path):
+    client = _client(['{"p":0.2}', '{"p":0.8}'], LLMAnswerStore(record_dir=tmp_path))
+    for pixels, expected in [(b"left", 0.2), (b"right", 0.8), (b"left", 0.2)]:
+        assert client.chat_json("s", "same target", image_jpeg=pixels)["p"] == expected
+    assert len(client.sess.payloads) == 2
+    rows = [json.loads(line) for line in next(tmp_path.glob("answers-*.jsonl")).read_text().splitlines()]
+    assert len({r["image_sha256"] for r in rows}) == 2 and all("images" not in r for r in rows)
+
+
+def test_an_unusable_visual_reply_cannot_poison_retries_for_the_same_pixels(tmp_path):
+    def validate(reply):
+        if type(reply.get("p")) is not float:
+            raise ValueError("not a probability")
+
+    client = _client(['{"p":true}', '{"p":0.5}'], LLMAnswerStore(record_dir=tmp_path))
+    client.validate_answer = validate
+    with pytest.raises(ValueError, match="not a probability"):
+        client.chat_json("s", "u", image_jpeg=b"same")
+    assert not list(tmp_path.glob("answers-*.jsonl"))
+    assert client.chat_json("s", "u", image_jpeg=b"same") == {"p": 0.5}
+
+
 def test_a_resumed_run_keeps_its_answers_and_does_not_record_them_twice(tmp_path):
     _client(['{"a": 1}'], LLMAnswerStore(record_dir=tmp_path)).chat_json("s", "u")
     again = _client([], LLMAnswerStore(record_dir=tmp_path))

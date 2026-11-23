@@ -8,6 +8,14 @@ contract. No navigation, frontier, camera-control or STOP algorithm is replaced.
 YOLO S/L remain explicit checkpoint overrides. The default change does not
 change confidence thresholds or add fusion/reasoning from the reviewed papers.
 
+For ObjectNav `--agent rpt`, YOLO-World also exposes `POST /detect/scoped`:
+the JPEG body is unchanged, and `X-Detection-Classes` is a JSON list drawn
+from the server's configured classes. Prompt selection, inference and the
+class echo are serialized together, so parallel episodes cannot exchange
+class indices. `/health` advertises `scoped_prompts` and the stable server
+vocabulary; `/detect` still predicts the whole configured vocabulary for
+`--agent rpt_room_llm`. Use each comparison arm's `--print-vocabulary`.
+
 ## Optional grounded visual verification
 
 The [Grounding DINO + BLIP-2 runbook](GROUNDED_VLM.md) adds `grounded_vlm`

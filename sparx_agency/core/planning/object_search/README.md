@@ -3,44 +3,50 @@
 A `SearchPolicy` for the ObjectNav contract in
 [`core/planning/objnav`](../objnav/README.md): given ground-truth RGB-D and
 pose, find a named object category in an unseen home with a discrete action
-set, and STOP inside the success region. Observed-only mapping, a room graph
-with revisable LLM labels, a node oracle that values every room from the big
-picture, RPT\* for the visit order, frontier or planar-FALCON local exploration,
-A\*/WA\* routes, and a high-priority target closing. Training-free, and
+set, and STOP inside the success region. The live RPT policy scores reachable
+frontiers from boxed RGB views, orders those nodes with RPT\*, and follows the
+selected goal with A\*. The detector's target closing has priority. Training-free, and
 given no simulator geometry: no navmesh, no pathfinder, no storey or stair
 annotations (see "No privileged geometry" below).
 
 ```text
  ObjNavEnv (adapter, tasks/)                 RPTSearchPolicy (this package)
  ─────────────────────────────               ─────────────────────────────────────────────────────────
- ObjNavObservation ───────────────────────►  perception/   detector boxes → coherent 3-D centroids → landmarks, doors
+ ObjNavObservation ───────────────────────►  perception/   this target's aliases + stairs only; optional target masks
                                              world_model/  per-storey log-odds occupancy, sight ledger, stair surfaces
-                                             rooms/        watershed rooms → labels → node oracle → RPT* order → the loop
-                                             exploration/  frontier sweep, glances, peeks, the fallback ladder, escape
-                                             multifloor/   spawn-floor guard (default) or the building coordinator
+                                             frontier_views/  reachable clusters → sticky nodes → boxed frames → VLM probability → RPT*
+                                             exploration/  geometry-only warm-up, glances, fallback and escape
+                                             multifloor/   measured treads, drop masks and retreat; no portal destinations
                                              closing/      the target takeover: verify, approach, pitch, STOP
                                              navigation/   the route as the exact actions that walk it (lattice), doorway scrapes, the look-down
-                                             frame_log/    optional: every decided RGB frame kept under its capture pose (disk or RAM)
-                                             frontier_views/  offline for now: which logged frames show a frontier node (no decision reads it yet)
+                                             frame_log/    every decided RGB frame under its capture pose (RAM by default, disk optional)
  NavigationCommand ◄──────────────────────  policy.py     one decision per frame, in world coordinates
 ```
 
 The policy never names a simulator, a dataset or a wire format. It is built
 with three services -- an object **detector**, an optional box-prompted
-**segmenter** and a **room-reasoning LLM** -- behind the protocols of
+**segmenter** and an **image-capable JSON model** -- behind the protocols of
 [`interfaces.py`](interfaces.py); the HTTP clients that implement them, the
 Habitat bridge, the Gibson files and the run CLI live in
 [`tasks/planning/objnav_benchmark_runtime`](../../../tasks/planning/objnav_benchmark_runtime/README.md).
 `tests/test_package_boundaries.py` enforces the line, and
 `tests/test_no_privileged_geometry.py` the stricter one behind it: nothing
 under `sparx_agency/core` can reach the simulator's navmesh, its pathfinder
-or ground-truth storey data. A fourth thing may be handed in beside the
-services, and is off unless it is: a [**frame log**](frame_log/README.md)
-(`RPTSearchPolicy(..., frame_log=...)`), which keeps every RGB frame the
-policy decides on under the pose it was captured from. What will read it --
-[`frontier_views/`](frontier_views/README.md): for each frontier node, the one
-to three logged frames that show it best -- is here and tested, and is not
-called by the policy yet.
+or ground-truth storey data. The [frame log](frame_log/README.md) is episode-local.
+[`frontier_views/`](frontier_views/README.md) selects one to three views per due
+node on every observed floor step, including warm-up and closing. It scores
+each sticky ID once, not once per image. The visual model never decides a
+motion or a STOP. RGB can show what lies **beyond** a frontier at the camera's
+5 m depth horizon. The VLM sees the full RGB view with the frontier's bearing
+outlined; it never extends the measured floor. An RGB target without usable
+depth can start a bounded, clearance-checked bearing approach in `TargetClosing`,
+but cannot establish a metric target or a STOP until measured.
+
+`--agent rpt_room_llm` selects [`LegacyRoomSearchPolicy`](rooms/legacy_policy.py):
+the full detector vocabulary, object and door landmarks, watershed, room names,
+text room probabilities and room visits described below. It is a separate
+comparison arm, not a fallback of `--agent rpt`. The visual arm does not build
+a room graph, use non-target support sightings or run a second target pursuit.
 
 ## Layout
 
@@ -59,8 +65,8 @@ called by the policy yet.
 | `route_memory.py` | the committed-route memory: when a planned path is kept, re-used or released |
 | `navigation/` | the narrow-passage layer (2026-10-28): `kinematic_follower.py` (every committed route walked as the action sequence the discrete-action lattice plans, `core/planning/planners/lattice`), `bottlenecks.py` (doorways and corridors read off the clearance field), `scrape_guard.py` (a refused step in a doorway stays off the map), `doorway_look_down.py` (the camera pitched on the approach); see its README |
 | `baselines/` | `falcon_yolo.py`: goal-free FALCON + the same perception and closing, no LLM (`--agent falcon-yolo`) |
-| `frame_log/` | the policy's optional visual memory (2026-11-22), the first piece of the VLM pipeline of `docs/papers/vlm-search-scoring-20261119`: `episode_frame_log.py` (`EpisodeFrameLog`: begun at every reset, fed at the top of every decision with the observation's RGB frame, its step and its pose; `records` is the lookup dictionary from a frame's file name to its capture pose, `rgb(name)` the image), `interfaces.py` (`FrameRecord`, the `FrameStore` protocol, `FrameLogError` -- an `ObjNavInternalError`, so a frame that cannot be kept stops a run instead of being scored as a failed episode), `disk_store.py` (one folder per episode: the images beside `frames.jsonl`; `read_frame_log` reads one back), `memory_store.py` (the same encoded bytes in RAM, dropped per episode), `codec.py` (JPEG quality 95 by default, PNG for lossless). Handed to the policy at construction and off without it; `OBJNAV_FRAME_LOG_DIR=<dir>` turns the disk log on for a benchmark run. It keeps frames and changes no decision: nothing reads it back during an episode yet. See its README |
-| `frontier_views/` | the second piece of that pipeline (2026-11-22), tested and replayed offline, called by no decision yet: `nodes.py` (`frontier_nodes`: the clusters of the frontier inventory -- `FrontierInventory.clusters` -- merged within 1.5 m by the openings' own rule, floored at five cells, each with a sticky id from an `OpeningRegistry` and a goal point RPT\* can take as it is), `sight.py` (`SightScene`: per frame and cell of a node -- in range, in the picture by the share of a 0-1.5 m height band clipped against the image, seen along a sight line over the map of this decision, and seen THROUGH into unsettled unknown or not), `selection.py` (`select_views`: one to three frames per node by greedy coverage of its cells, the window each node lands in, or the gate every frame failed), `score_ledger.py` (`ScoreLedger`: a node is scored once, the first action it has a usable view, never again; one still there twelve actions after the agent stood at it is blocked), `settings.py` (`ViewSettings`). The strict reading -- only a frame that looks past the boundary counts -- scored a third of the nodes of six replayed MP3D episodes, because the map's boundary is the edge of what every frame's depth resolved; a cell seen but not seen through counts at half, and four nodes in five are scored. See its README for the numbers and what they say about what a model can be asked |
+| `frame_log/` | `EpisodeFrameLog`: RGB, step and capture pose in RAM, or on disk with `OBJNAV_FRAME_LOG_DIR`; begins empty at reset |
+| `frontier_views/` | `frontier_nodes`, `select_views`, `ScoreLedger`, visual scoring (`scoring.py`) and live observation and routing (`search.py`); see its README for the visibility rule and replay analysis |
 | `tests/` | the package's contract tests: boundaries, a service-free smoke run, the failure contract; see below |
 
 What the method shares with the rest of `core` it imports from there rather
@@ -85,7 +91,7 @@ and `core/mapping` imports nothing from `core/planning`. Moving the shared map
 and pose vocabulary down into `core/common/types` would let it move; that is
 a repository-wide change (over a hundred importers) and not this package's.
 
-## No hand-written semantic priors
+## No hand-written semantic priors (historical text-room policy)
 Since 2026-11-15 the method carries no table that tells it where a target is
 likely to be. `core/mapping/topology/room_priors.py` was deleted with every
 consumer: the `WHERE IT LIVES` line of the oracle's prompt (likely and rare

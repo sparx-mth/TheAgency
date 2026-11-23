@@ -53,7 +53,8 @@ NODE_ID = re.compile(r"^id=(\d+)", re.MULTILINE)
 #: The benchmarks whose ``run`` module this can drive.
 BENCHMARKS = ("mp3d", "hm3d", "gibson")
 RUNTIME = "sparx_agency.tasks.planning.objnav_benchmark_runtime"
-DESCRIPTION = ("in-process stand-in, no model: every room %s at confidence %.1f, the nodes of an oracle prompt "
+DESCRIPTION = ("in-process stand-in, no model: a boxed frontier gets p=0.15; historical room prompts: "
+               "every room %s at confidence %.1f, the nodes of an oracle prompt "
                "an equal share of %d%%" % (STUB_LABEL, STUB_CONFIDENCE, STUB_TOTAL_PERCENT))
 
 
@@ -96,6 +97,8 @@ class StubLLMClient:
 
     def chat_json(self, system, user, **kwargs):
         self.calls += 1
+        if kwargs.get("image_jpeg") is not None:
+            return {"probability": 0.15}
         return stub_reply(system, user)
 
     def set_answer_scope(self, scope):
@@ -109,6 +112,7 @@ def install():
     """Replace the runtime's verified LLM client with the stand-in, for every policy built after this call."""
     service = importlib.import_module(RUNTIME + ".services.llm")
     service.VerifiedLLMClient = StubLLMClient
+    service.VerifiedRoomClient = StubLLMClient
     return service
 
 

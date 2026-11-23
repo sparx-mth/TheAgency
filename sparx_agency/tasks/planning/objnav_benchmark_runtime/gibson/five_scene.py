@@ -231,7 +231,7 @@ def main(argv=None):
                         help="Each scene's N episodes are a random sample seeded with --seed, not the first N "
                              "(forwarded to every job)")
     parser.add_argument("--explorer", choices=("frontier", "falcon"), default=None)
-    parser.add_argument("--agent", choices=("rpt", "falcon-yolo"), default=None,
+    parser.add_argument("--agent", choices=("rpt", "rpt_room_llm", "falcon-yolo"), default=None,
                         help="Forwarded to every scene run: the room-search method (rpt, the default) or the "
                              "FALCON + YOLO + closing exploration baseline (falcon-yolo, no LLM)")
     parser.add_argument("--seed", type=int, default=0)

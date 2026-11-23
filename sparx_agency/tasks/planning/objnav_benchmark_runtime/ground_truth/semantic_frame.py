@@ -32,7 +32,7 @@ class InstanceExtent:
     pixels: int
 
 
-def instance_extents(ids, *, min_pixels=1, ignore=(0,)) -> Dict[int, InstanceExtent]:
+def instance_extents(ids, *, min_pixels=1, ignore=(0,), include=None) -> Dict[int, InstanceExtent]:
     """The tight box and area of every instance visible in ``ids``.
 
     Args:
@@ -41,6 +41,7 @@ def instance_extents(ids, *, min_pixels=1, ignore=(0,)) -> Dict[int, InstanceExt
             default reports every visible pixel; the oracle detector sets the
             floor it declares.
         ignore: Ids that are not instances (``0``, habitat-sim's "nothing").
+        include: If given, only measure these instance IDs; never box background classes.
 
     Returns:
         ``{instance id: InstanceExtent}`` in ascending id order.
@@ -56,7 +57,7 @@ def instance_extents(ids, *, min_pixels=1, ignore=(0,)) -> Dict[int, InstanceExt
     present, counts = np.unique(frame, return_counts=True)
     extents = {}
     for instance, pixels in zip(present.tolist(), counts.tolist()):
-        if instance in ignore or pixels < min_pixels:
+        if instance in ignore or pixels < min_pixels or (include is not None and instance not in include):
             continue
         rows, cols = np.nonzero(frame == instance)
         extents[int(instance)] = InstanceExtent(

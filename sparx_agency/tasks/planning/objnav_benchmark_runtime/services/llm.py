@@ -5,11 +5,6 @@ from urllib.parse import urlsplit
 
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
 
-#: The probe's two nodes: a node prompt of the run's own shape, small enough to answer in seconds.
-PROBE_TARGET = "toilet"
-PROBE_HOUSE = ("rooms found: living_room (entered); 1 room unidentified; 1 opening not yet looked into; "
-               "unexplored frontier reachable; actions used about 0 of 500")
-
 
 def public_service_url(url):
     """Reject credentials in a URL that will be written to run metadata."""
@@ -24,8 +19,7 @@ def public_service_url(url):
 class VerifiedLLMClient:
     """Check the requested models, not merely a live port or an HTTP 401.
 
-    Every model the config names -- the default one for the cheap calls and
-    the reasoning one for the node oracle -- must be provisioned. Ollama
+    Every model the config names (one vision model for live RPT) must be provisioned. Ollama
     exposes a digest per model, pinned for the run. OpenAI-compatible
     providers often expose only model ids: that limitation is recorded rather
     than claiming immutable remote weights. GET requests never start inference.
@@ -58,6 +52,9 @@ class VerifiedLLMClient:
                 raise ObjNavInternalError("Requested LLM model %r is not provisioned" % model)
             identity["models"][model] = {"digest": matches[0].get("digest"),
                                          "immutable_revision_exposed": bool(matches[0].get("digest"))}
+            quant = (matches[0].get("details") or {}).get("quantization_level")
+            if quant:
+                identity["models"][model]["quantization"] = quant
         identity.update(model=cfg.model, reasoning_model=getattr(cfg, "reasoning_model", cfg.model),
                         digest=identity["models"][cfg.model]["digest"],
                         immutable_revision_exposed=identity["models"][cfg.model]["immutable_revision_exposed"])
@@ -67,43 +64,24 @@ class VerifiedLLMClient:
         return identity
 
     def probe(self):
-        """Ask both routes one real question with the run's own options; raise unless both answer usably.
+        """Prove the server accepts an image and returns a valid frontier probability, without using replay."""
+        import numpy as np
+        from sparx_agency.core.planning.object_search.frontier_views.scoring import ask_frontier, marked_view
 
-        :meth:`health` proves the models are provisioned, not that the server
-        answers the node oracle's request -- its model, window, reply cap and
-        timeout. The 2026-10-28 sweep passed every health check and then got
-        no oracle answer in 2,000 episodes. Run once, before the first episode.
-
-        Raises:
-            ObjNavInternalError: A route raised, or the oracle's reply does not
-                score the probe's nodes.
-        """
-        from sparx_agency.core.mapping.topology.search_node_oracle import (
-            ROOM, SearchContext, SearchNode, SearchNodeOracle, system_prompt)
-        nodes = (SearchNode(id=0, kind=ROOM, label="living_room", area_m2=20.0, frontier_clusters=1,
-                            here=True, objects=("couch",)),
-                 SearchNode(id=1, kind=ROOM, label="unknown", area_m2=6.0, frontier_clusters=1, exits=1))
-        oracle = SearchNodeOracle(self.client)
-        context = SearchContext(house=PROBE_HOUSE)
-        # The probe proves the SERVER answers: an answer store would replay it, and record it into the run.
+        image = marked_view(np.zeros((96, 128, 3), dtype=np.uint8), (24, 16, 96, 80))
         answers, self.client.answers = getattr(self.client, "answers", None), None
         try:
-            try:
-                reply = oracle.ask(oracle.prompt(PROBE_TARGET, nodes, context), system_prompt(nodes, context))
-            except Exception as exc:
-                raise ObjNavInternalError("The node oracle's route (%s) failed a real oracle prompt: %s"
-                                          % (self.client.cfg.reasoning_model, exc)) from exc
-            if oracle.score(reply, nodes) is None:
-                raise ObjNavInternalError("The node oracle's route (%s) answered a real oracle prompt unusably: %r"
-                                          % (self.client.cfg.reasoning_model, reply))
-            try:
-                label = self.client.chat_json('Reply with JSON only.', 'Return {"ok": true}.')
-            except Exception as exc:
-                raise ObjNavInternalError("The room-label route (%s) failed: %s"
-                                          % (self.client.cfg.model, exc)) from exc
-            if not isinstance(label, dict):
-                raise ObjNavInternalError("The room-label route (%s) did not answer a JSON object"
-                                          % self.client.cfg.model)
+            cfg = self.client.cfg
+            if cfg.backend == "ollama":
+                response = self.client.sess.post(cfg.base_url + "/api/show", json={"model": cfg.model},
+                                                 timeout=min(10.0, cfg.timeout_s))
+                response.raise_for_status()
+                capabilities = response.json().get("capabilities")
+                if capabilities is not None and "vision" not in capabilities:
+                    raise ValueError("the configured Ollama model does not advertise vision")
+            ask_frontier(self.client, "chair", [image])
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ObjNavInternalError("Frontier VLM %r failed its image probe: %s" % (self.client.cfg.model, exc)) from exc
         finally:
             self.client.answers = answers
 
@@ -121,3 +99,25 @@ class VerifiedLLMClient:
         """The wrapped client's answer-store counters, or None."""
         stats = getattr(self.client, "answer_stats", None)
         return stats() if stats is not None else None
+
+
+class VerifiedRoomClient(VerifiedLLMClient):
+    """Preflight the original room labeller and node oracle, never an image request."""
+
+    def probe(self):
+        from sparx_agency.core.mapping.topology.search_node_oracle import (
+            ROOM, SearchContext, SearchNode, SearchNodeOracle, system_prompt)
+        nodes = (SearchNode(id=0, kind=ROOM, label="living_room", area_m2=20.0, frontier_clusters=1,
+                            here=True, objects=("couch",)),
+                 SearchNode(id=1, kind=ROOM, label="unknown", area_m2=6.0, frontier_clusters=1, exits=1))
+        context = SearchContext(house="one living room entered; one unknown room; unexplored frontier reachable")
+        oracle = SearchNodeOracle(self.client)
+        answers, self.client.answers = self.client.answers, None
+        try:
+            reply = oracle.ask(oracle.prompt("toilet", nodes, context), system_prompt(nodes, context))
+            if oracle.score(reply, nodes) is None:
+                raise ObjNavInternalError("Room oracle failed its text probe: %r" % (reply,))
+            if not isinstance(self.client.chat_json("Reply with JSON only.", 'Return {"ok": true}.'), dict):
+                raise ObjNavInternalError("Room labeller failed its text probe")
+        finally:
+            self.client.answers = answers

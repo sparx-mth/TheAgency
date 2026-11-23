@@ -131,8 +131,9 @@ class DoorwayPeek:
         if self.active is None:
             # A single confirmed-object clue may supply the initial label
             # before a peek steals control from the normal reasoning cadence.
-            for pid in self.pending_rooms():
-                p.loop._reclassify(obs, pid, "peek_candidate")
+            if p.loop is not None:
+                for pid in self.pending_rooms():
+                    p.loop._reclassify(obs, pid, "peek_candidate")
             candidates = doorway_candidates(self.policy, obs, world, self.settings, nearby=not force,
                                              room_ids=set(self.pending_rooms()))
             for distance, pid, xy, heading, mask in candidates:
@@ -180,7 +181,8 @@ class DoorwayPeek:
             self.cancel(obs, "room_disappeared")
             return None
         active["room"] = room.id
-        p.loop._reclassify(obs, room.id, "peek_active")
+        if p.loop is not None:
+            p.loop._reclassify(obs, room.id, "peek_active")
         info = p.graph.label_info(room.id) or {}
         if info.get("label") not in (None, "", "unknown"):
             active["record"].update(classified=True, initial_label=info["label"])

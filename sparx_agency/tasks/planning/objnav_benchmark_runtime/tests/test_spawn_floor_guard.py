@@ -184,13 +184,13 @@ def test_entrypoint_defaults_sit_below_the_policy_config_and_above_the_settings_
         def health(self):
             return {"metadata": {"backend": "yolo_world", "detector_config": {"conf_thresh": 0.05}}}
 
-    monkeypatch.setattr(llm, "VerifiedLLMClient", Verified)
+    monkeypatch.setattr(llm, "VerifiedRoomClient", Verified)
     monkeypatch.setattr(http_detector, "HttpDetector", Detector)
     config = tmp_path / "policy.json"
     config.write_text(json.dumps({"allow_stair_traversal": False}))
 
     def args(policy_config=None):
-        return SimpleNamespace(agent="rpt", policy_config=policy_config, explorer=None, seed=0,
+        return SimpleNamespace(agent="rpt_room_llm", policy_config=policy_config, explorer=None, seed=0,
                                detector_url="http://127.0.0.1:1", detector_backend="yolo_world", detector_timeout_s=30.0)
 
     assert run._method(args())[1]["allow_stair_traversal"] is False

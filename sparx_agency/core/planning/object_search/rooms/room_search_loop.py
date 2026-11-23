@@ -144,12 +144,12 @@ from sparx_agency.core.mapping.topology.search_node_oracle import BUDGET_STEP, U
 from sparx_agency.core.mapping.topology.search_node_prompts import DEFAULT_PROMPT, prompt_version
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.frontier_ranking import (
-    accessible_frontiers, frontier_goals_by_room, rank_by_view_gain, trail_visits)
+    accessible_frontiers, frontier_goals_by_room, rank_by_view_gain)
 from sparx_agency.core.planning.exploration.object_search_supervisor import (
     ALL_VERDICTS, BLOCKED, BUDGET_SPENT, EXHAUSTED, MAPPED, NEUTRAL, SEARCH, SELECT, TRANSIT, TRANSIT_TIMEOUT,
     UNREACHABLE, ObjectSearchParams)
 from sparx_agency.core.planning.exploration.room_costs import build_instance
-from sparx_agency.core.planning.exploration.view_gain import UnknownView, cone_from_camera
+from sparx_agency.core.planning.object_search.exploration.frontier_view_gain import FrontierViewGain
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.core.planning.object_search.exploration.exploration_fallback import ROOM_LLM
@@ -690,7 +690,7 @@ class LoopSettings:
             repeat_verdicts=tuple(v for v in ALL_VERDICTS if v not in (EXHAUSTED, MAPPED)), **extra)
 
 
-class RoomSearchLoop:
+class RoomSearchLoop(FrontierViewGain):
     """Runs the seven steps over the policy's supervisor, scene graph and sweep.
 
     Attributes:
@@ -707,7 +707,7 @@ class RoomSearchLoop:
     """
 
     def __init__(self, policy, settings=None):
-        self.policy = policy
+        super().__init__(policy)
         self.settings = settings or LoopSettings()
         self.local_steps = 0
         self.room_id = None
@@ -728,8 +728,6 @@ class RoomSearchLoop:
         self._second_pass_logged = False   # the second_pass event is logged once per stretch of the verdict
         self._exhausted = False       # the floor has no unfinished room, no exit and no reachable frontier left
         self._covered = False         # ... no unfinished room and no exit (the second pass's gate; frontier may remain)
-        self._view_cache = None       # (step, UnknownView) -- the openings' and the explore goals' ray caster this action
-        self._visits_cache = None     # (step, visits) -- the trail's visitation count for the goal ranking this action
         self._value_factors = {}      # node id -> the factor the oracle's probability was scaled by at the last SELECT
         self._peek_missing = 0        # consecutive actions the peek in force's opening was absent from the inventory
         self._scan = None             # the visit in force under ``scan``: phase, room, approach actions, swept yaw
@@ -1989,41 +1987,6 @@ class RoomSearchLoop:
         return rank_by_view_gain(goals, view, p.sweep.settings.ranking, min_gain_cells=min_gain,
                                  visits=self._visits(obs))
 
-    def _visits(self, obs):
-        """``xy -> actions spent nearby`` over the storey's trail (:func:`~frontier_ranking.trail_visits`), built once per action.
-
-        The ranking's visitation discount (``FrontierRankingParams.visit_weight``):
-        a frontier beside ground the agent has crossed many times ranks under
-        one in ground it has barely been near. None when the sight ledger is
-        not there or the weight is off.
-        """
-        p = self.policy
-        ranking = p.sweep.settings.ranking
-        sight = getattr(p, "sight", None)
-        if sight is None or getattr(ranking, "visit_weight", 0.0) <= 0.0:
-            return None
-        cached = self._visits_cache
-        if cached is not None and cached[0] == int(obs.step):
-            return cached[1]
-        visits = trail_visits([(x, y) for _, x, y, _, _ in sight.poses()], ranking.visit_radius_m)
-        self._visits_cache = (int(obs.step), visits)
-        return visits
-
-    def _unknown_view(self, obs, world):
-        """The ray caster over this action's map, built once per action for every goal and opening read on it."""
-        cached = self._view_cache
-        if cached is not None and cached[0] == int(obs.step) and cached[1] is world:
-            return cached[2]
-        p = self.policy
-        camera = p.episode.camera
-        k = camera.intrinsics
-        sight = getattr(p, "sight", None)
-        view = UnknownView(world, cone_from_camera(k.width, k.fx, float(camera.max_depth_m), p.glance_settings.blind_m
-                                                   if hasattr(p, "glance_settings") else 0.0),
-                           resolved=sight.resolved(world) if sight is not None else None)
-        self._view_cache = (int(obs.step), world, view)
-        return view
-
     def _explore_entry(self, obs, world, cost, room, revisit=False):
         """Where a room is entered under ``explore``: ``((x, y), from_frontier)``.
 
@@ -3243,6 +3206,5 @@ class RoomSearchLoop:
                 "openings_offered": sorted(self._openings),
                 "openings_folded": sorted(self._folded_now),
                 "events": list(self.events), "estimate_events": list(self.estimate_events)}
-
 
 

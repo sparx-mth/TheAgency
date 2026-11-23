@@ -157,6 +157,19 @@ def test_plan_from_environment_reads_models_dir_overrides_and_reserve(tmp_path):
     assert "export ALLOW_SHARED_GPU='1'" in text and "export DETECTOR_DEVICE='cuda:0'" in text
 
 
+def test_cold_vision_service_budgets_weights_and_vision_workspace_without_a_second_text_model(tmp_path):
+    def memory(cmd):
+        return "RTX 4090, 24564, 500\n"
+
+    env = {"OLLAMA_MODELS_DIR": str(tmp_path), "LLM_REASONING_MODEL": "old-text-model", "GPU_RESERVE_MIB": "2048"}
+    result = plan_from_environment(0, run=memory, env=env)
+    visual = result.placement("llm")
+    assert visual.need_mib > gpu_plan.VLM_WEIGHT_ESTIMATE_MIB and "vision workspace" in visual.reason
+    assert devices(result) == {"llm": "gpu", "yolo": "gpu", "habitat": "gpu"} and result.reserve_mib == 2048
+    pair = plan_from_environment(0, run=memory, env=dict(env, OBJNAV_VLM_SERVERS="2"))
+    assert pair.placement("llm").need_mib == 2 * visual.need_mib
+
+
 def test_component_validation_is_explicit():
     with pytest.raises(TypeError):
         Component("x", 1)   # need_mib and cpu_capable are required

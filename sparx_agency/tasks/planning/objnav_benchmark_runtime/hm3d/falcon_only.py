@@ -2,10 +2,9 @@
 
 Dev tool for the multi-resolution FALCON pre-scan work (see repo-root
 HANDOFF.md): reuses ``hm3d.run``'s own dataset/env/policy/config assembly via
-``prepare()``, then swaps the policy's detector/llm_client for inline fakes
-*before* ``reset()`` runs -- so no real YOLO/Ollama HTTP calls happen during
-the episode, and no model service needs to be reachable at all except for the
-one-time health check ``prepare()`` performs on the real (discarded) client.
+``prepare()`` with the goal-free FALCON baseline, then swaps the detector for
+an empty fixture before ``reset()``. Only the detector preflight needs a
+service; no VLM is constructed.
 
 This is pure exploration, not a benchmark run: SR/SPL are meaningless here
 (the fake detector never reports a target), only the agent_info exploration
@@ -21,24 +20,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import tempfile
 
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.evaluation import run_evaluation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import protocol_for
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.run import parser, prepare
-
-
-class FakeLLM:
-    """Neutral room classifier + node oracle; no network call."""
-
-    def chat_json(self, system, user, **kwargs):
-        if "Room observed objects" in user:
-            return {"label": "unknown", "confidence": 0.0, "reasoning": "exploration-only run"}
-        ids = [int(nid) for nid in re.findall(r"^id=(\d+)", user, re.MULTILINE)]
-        share = max(1, int(round(90 / max(1, len(ids)))))
-        return {"nodes": [{"id": nid, "why": "no opinion", "p": share} for nid in ids],
-                "elsewhere": max(0, 100 - share * len(ids))}
 
 
 class FakeDetector:
@@ -66,7 +52,7 @@ def main(argv=None):
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump(overrides, handle)
         policy_config_path = handle.name
-    args = parser().parse_args(["--explorer", "falcon", "--policy-config", policy_config_path, *rest])
+    args = parser().parse_args(["--agent", "falcon-yolo", "--policy-config", policy_config_path, *rest])
     protocol = protocol_for(args.version).with_split(args.split)
     env, policy, label_mapper, config, issues = prepare(args)
     if issues:
@@ -74,9 +60,7 @@ def main(argv=None):
         return 1
 
     policy.detector = FakeDetector()
-    policy.llm_client = FakeLLM()
     config["method"]["detector"] = {"backend": "fake", "note": "exploration-only run, no real detector"}
-    config["method"]["llm_identity"] = {"backend": "fake", "note": "exploration-only run, no real LLM"}
     selected = tuple(config["selected_episode_ids"])
 
     def progress(index, total_count, row):

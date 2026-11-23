@@ -95,7 +95,7 @@ class FloorContextBank:
     def diagnostics(self):
         out = []
         for floor_id, state in self.save().items():
-            loop = state["loop"].diagnostics()
+            loop = state["loop"].diagnostics() if state["loop"] is not None else None
             out.append({"floor_id": floor_id, "rooms": len(state["graph"].registry.rooms),
                         "landmarks": len(state["landmarks"]), "llm_queries": state["graph"].queries,
                         "search_time_s": state["_floor_time"], "supervisor": dict(state["supervisor"].stats),
@@ -103,6 +103,6 @@ class FloorContextBank:
                         "room_ids": ["f%d/r%d" % (floor_id, pid) for pid in state["graph"].registry.rooms],
                         # The loop is floor-local; without this the storey the agent left
                         # keeps no record of what it decided there.
-                        "room_search_loop": {k: loop[k] for k in ("stats", "events", "estimate_events", "excluded")}})
+                        "room_search_loop": {k: loop[k] for k in ("stats", "events", "estimate_events", "excluded")}
+                        if loop is not None else None})
         return out
-

@@ -114,7 +114,7 @@ def main(argv=None):
                 destination = args.output / backend / scene
                 destination.mkdir(parents=True)
                 command = [sys.executable, "-u", "-m", "sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.run",
-                           "--scene", scene, "--limit", "1", "--explorer", backend, "--output", str(destination),
+                           "--scene", scene, "--limit", "1", "--agent", "rpt_room_llm", "--explorer", backend, "--output", str(destination),
                            "--episodes-dir", args.episodes_dir, "--scenes-dir", args.scenes_dir, "--seed", str(args.seed)]
                 command += detector_flags(args)
                 if args.policy_config:
@@ -130,6 +130,5 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
-
 
 

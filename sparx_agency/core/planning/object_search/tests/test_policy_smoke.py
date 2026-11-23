@@ -10,6 +10,7 @@ are.
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -17,26 +18,23 @@ from sparx_agency.core.planning.object_search.interfaces import (
     Detection, DetectorFrameError, RECOVERABLE_DETECTOR_CAUSES, detection_from_wire, ground_truth_semantics)
 from sparx_agency.core.planning.object_search.tests.fixtures import (
     FakeDetector, FakeLLM, body_actions, frame, make_policy)
-from sparx_agency.core.mapping.topology.search_node_prompts import DEFAULT_PROMPT, PROMPTS
 from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
+from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
+from sparx_agency.core.planning.objnav.types.pose import AgentPose
 
 
-def test_the_policy_plans_from_a_frame_through_mapping_room_reasoning_and_the_solver():
-    detector, llm = FakeDetector("bed"), FakeLLM()
-    policy, ep = make_policy(detector, llm)
-    command = policy.plan(frame(ep, 0, depth=3.0))
-    assert not command.stop
-    assert detector.calls == 1 and llm.calls >= 1
-    assert policy.graph.queries == 1 and policy.solver.calls == 1
-    assert command.info["phase"] and command.info["floor_id"] == policy.mapping.floor_id
-
-
-def test_an_episode_starts_with_the_warm_up_rotation_before_any_room_is_valued():
+def test_every_warmup_frame_updates_the_frontiers_but_routing_waits_for_the_rotation():
     detector, llm = FakeDetector("bed"), FakeLLM()
     policy, ep = make_policy(detector, llm, warmed_up=False)
-    command = policy.plan(frame(ep, 0, depth=3.0))
-    assert not command.stop and command.final_yaw is not None, "the warm-up is a turn in place"
-    assert detector.calls == 1 and llm.calls == 0 and policy.graph.queries == 0
+    for step in range(policy.warmup_turns + 1):
+        obs = frame(ep, step, depth=2.0, pose=AgentPose(0, 0, 0, math.radians(30 * step)))
+        command = policy.plan(obs)
+        if step < policy.warmup_turns:
+            assert command.info["kind"] == "warmup" and policy.solver.calls == 0
+            policy.notify_action(obs, DiscreteAction.TURN_LEFT)
+    assert llm.calls == policy.frontiers.calls > 0 and not hasattr(policy, "graph")
+    assert detector.calls == policy.warmup_turns + 1 and not hasattr(policy, "loop")
+    assert command.info["frontier_id"] in policy.frontiers.scores and command.waypoints
 
 
 def test_a_target_seen_in_two_distinct_frames_locks_the_closing_and_stops():
@@ -69,19 +67,10 @@ def test_the_planner_is_the_settings_own_so_a_replay_of_a_recorded_action_builds
     assert policy.configuration()["planner"] == asdict(params)
 
 
-def test_the_run_record_names_the_oracles_prompt_version_and_the_oracle_is_asked_under_it():
-    """A wording is tuned per model (``search_node_prompts.py``): the run record says which version was used -- its
-    name, the model it was tuned on, the digest of its text -- and an unregistered name is refused at start-up."""
-    policy, ep = make_policy()
-    record = policy.configuration()["node_oracle"]["prompt"]
-    assert record == PROMPTS[DEFAULT_PROMPT].describe() and policy.loop_settings.oracle_prompt == DEFAULT_PROMPT
-    assert set(record) == {"version", "tuned_on", "sha256", "system_chars"} and len(record["sha256"]) == 64
-    policy.plan(frame(ep, 0, depth=3.0))
-    assert policy.graph.oracle.version is PROMPTS[DEFAULT_PROMPT], "the oracle of the floor in force sends that version"
-    with pytest.raises(ValueError, match="no node-oracle prompt version is named 'facts-of-tomorrow'; registered: "):
-        make_policy(room_search={"oracle_prompt": "facts-of-tomorrow"})
-    with pytest.raises(ValueError, match="oracle_prompt must be the name"):
-        make_policy(room_search={"oracle_prompt": None})
+def test_the_run_record_names_the_visual_prompt_and_not_the_room_oracle():
+    policy, _ = make_policy()
+    assert policy.configuration()["frontier_search"]["prompt"] == "boxed-frontier-v2"
+    assert "node_oracle" not in policy.configuration()
 
 
 class _Annotated(FakeDetector):

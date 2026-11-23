@@ -6,10 +6,9 @@
 > guide to the multi-storey *development* campaigns.
 
 Run the full ObjectNav pipeline in the Habitat simulator on licensed Gibson
-buildings: observed RGB-D mapping → YOLO-World detections → room scene graph →
-room LLM (P(target) per room) → RPT\* room order → room-search loop with A\*
-routes → discrete actions. Stairs come from the simulator's navmesh (ground
-truth); floor transitions are decided explicitly. Everything else is observed.
+buildings: observed RGB-D mapping → reachable frontiers → boxed camera views →
+VLM probability per frontier → RPT\* order → A\* routes → discrete actions.
+YOLO-World and the target closing retain priority. Stairs are observed, not supplied by the simulator.
 
 Three processes cooperate, each in its own environment:
 
@@ -17,7 +16,7 @@ Three processes cooperate, each in its own environment:
 |---|---|---|---|
 | simulator + policy (`gibson.run_development` / `distinct_buildings`) | conda env `objnav-habitat` (Python 3.9, habitat-sim 0.2.4) | GPU 0 renders | habitat-sim pins its own Python/numpy |
 | detector HTTP service (YOLO-World) | `~/.venvs/objnav-detector` (Python ≥ 3.10, torch) | CPU | torch never goes in the Habitat env |
-| room LLM (Ollama, `qwen2.5:3b-instruct`) | system `ollama` | CPU | keeps the one GPU for the renderer |
+| frontier VLM (`qwen2.5vl:7b`, Q4_K_M) | system Ollama | RTX 4090 when the budget allows | one model server shared by the simulator workers |
 
 All commands run **from the repository root**. Set once per shell:
 
@@ -53,7 +52,7 @@ python3.10 -m venv "$HOME/.venvs/objnav-detector"
 "$DETECT_PY" -m pip install -r sparx_agency/tasks/mapping/scene_graph/serve/requirements-grounded-vlm.txt
 ```
 
-**Room LLM** — install [Ollama](https://ollama.com/download); the model is pulled in step 2.1.
+**Frontier VLM** — install a vision-capable [Ollama](https://ollama.com/download); the model is pulled in step 2.1.
 
 **Recordings** need FFmpeg on the `PATH` (`sudo apt install ffmpeg`).
 
@@ -94,7 +93,7 @@ CUDA_VISIBLE_DEVICES="" "$DETECT_PY" -m sparx_agency.tasks.mapping.scene_graph.s
 # -> $MODELS/yolov8x-worldv2.pt and $MODELS/clip/ViT-B-32.pt
 ```
 
-**Room LLM**: `qwen2.5:3b-instruct` via Ollama — pulled in step 2.1 into `$MODELS/ollama`.
+**Frontier VLM**: `qwen2.5vl:7b` via Ollama — pulled in step 2.1 into `$MODELS/ollama`.
 
 *Optional, off by default:* Grounding DINO + BLIP-2 (`--detector-backend hybrid|grounded_vlm`,
 ~17 GB) — see [`scene_graph/serve/GROUNDED_VLM.md`](../../mapping/scene_graph/serve/GROUNDED_VLM.md).
@@ -105,30 +104,48 @@ CUDA_VISIBLE_DEVICES="" "$DETECT_PY" -m sparx_agency.tasks.mapping.scene_graph.s
 
 Run the steps in this order. Steps 2.1–2.2 are long-running services: give each its own terminal.
 
-### 2.1 Start the room LLM (terminal 1, CPU only, its own port)
+### 2.1 Frontier VLM on a 24 GiB RTX 4090
+
+The benchmark launchers configure a native Ollama server; no PyTorch model
+is loaded into the policy or duplicated per episode. For manual setup on an
+**available** GPU, use a dedicated local port:
 
 ```bash
-CUDA_VISIBLE_DEVICES=-1 OLLAMA_HOST=127.0.0.1:11435 OLLAMA_MODELS="$MODELS/ollama" \
-OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_CONTEXT_LENGTH=8192 \
+CUDA_VISIBLE_DEVICES=0 OLLAMA_HOST=127.0.0.1:11435 OLLAMA_MODELS="$MODELS/ollama" \
+OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_CONTEXT_LENGTH=4096 \
+OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 \
 OLLAMA_KEEP_ALIVE=30m OLLAMA_NO_CLOUD=1 ollama serve
 ```
-Two roles are served -- the cheap, frequent room-type classification and the one
-node-oracle judgement per loop point. **By default one model answers both since
-2026-11-16: `qwen2.5:3b-instruct`** (about 2 GB), the model the development laptop can
-hold. A machine with the memory for it gives the oracle `qwen2.5:14b-instruct` (9 GB,
-Q4_K_M; the model of the runs published before that date) by setting
-`LLM_REASONING_MODEL`; `OLLAMA_MAX_LOADED_MODELS=2` then keeps both resident (~11 GB of
-RAM together) instead of reloading the 14B from disk at every loop point. First time
-only, in another shell:
+First time only, in another shell:
 ```bash
-OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:3b-instruct
-OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:14b-instruct   # only for LLM_REASONING_MODEL=qwen2.5:14b-instruct
+OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5vl:7b
 ```
-Check: `curl -s http://127.0.0.1:11435/api/tags` lists what was pulled. On a box where
-Ollama runs as the scene-graph stack's Docker container instead (`ollama-scene-graph`,
-CPU-only, port 11434, models in a named volume -- the development laptop), the
-equivalents are `docker start ollama-scene-graph`, `docker exec ollama-scene-graph
-ollama pull qwen2.5:3b-instruct`, and `LLM_BASE_URL=http://127.0.0.1:11434` below.
+The **weight precision comes from the model tag**, not a client-side dtype cast.
+The launcher records the server's digest and reported quantization. It requests a
+256-token prefill batch, a 4096-token window and a 32-token JSON reply. Each request
+contains one JPEG with at most three boxed views (640 px maximum long edge each).
+The default is one in-flight request per server and one loaded model. More workers
+share that model; they do not automatically multiply its KV caches. Keep the default
+of one server on a single card. Flash attention enables Ollama's Q8 KV cache; for a
+server build that lacks quantized KV support, set `OLLAMA_KV_CACHE_TYPE=f16` on the
+server and recheck the budget.
+
+The launcher budgets the model, vision workspace, YOLO and one renderer per worker,
+with `GPU_RESERVE_MIB=2048` left for headroom. These are estimates, not a peak
+memory guarantee. Start with one worker and inspect `ollama ps`, `nvidia-smi`
+and the run's `gpu_plan.json` before increasing `OLLAMA_NUM_PARALLEL` or `--jobs`.
+For a Docker or externally managed server, set server variables **there**;
+a client cannot change its attention implementation or KV precision. The existing
+OpenAI-compatible vision server is also supported: set `LLM_BACKEND=openai-compat`,
+`LLM_BASE_URL` to its local `/v1` URL and `LLM_MODEL` to its served model ID.
+Only Ollama consumes the `OLLAMA_*` and `LLM_NUM_BATCH` settings. For the
+repository's Qwen3-VL-4B vLLM checkpoint, use the supplied 4-bit checkpoint
+rather than loading full-precision weights in each worker. On a local 4090,
+start that server with FP16 compute (`--dtype float16`), `--gpu-memory-utilization 0.5`,
+`--max-model-len 4096`, `--max-num-seqs 2`, and `--limit-mm-per-prompt '{"image":1,"video":0}'`.
+This bounds the vLLM KV arena and leaves roughly half the card for the rest of
+the benchmark. Use **either** that server **or** Ollama, not both. The
+Grounding DINO/BLIP-2 detection backend is independent of frontier scoring.
 
 ### 2.2 Start the YOLO detector service (terminal 2, CPU only)
 
@@ -182,34 +199,25 @@ Omit `--multistory` for single-floor development starts (one episode per buildin
 ### 2.4 Export the run environment (terminal 3, the one that runs the simulator)
 
 ```bash
-export LLM_BACKEND=ollama LLM_BASE_URL=http://127.0.0.1:11435 LLM_MODEL=qwen2.5:3b-instruct LLM_TIMEOUT_S=120
-export LLM_REASONING_MODEL=qwen2.5:3b-instruct LLM_REASONING_TIMEOUT_S=600   # the launcher's default; a PC may name a larger model
+export LLM_BACKEND=ollama LLM_BASE_URL=http://127.0.0.1:11435 LLM_MODEL=qwen2.5vl:7b LLM_TIMEOUT_S=120
 MANIFEST="$HOME/objnav_benchmark/multistory/episodes.json"
 RUN_FLAGS="--detector-url http://127.0.0.1:18095 --seed 17 --allow-sim-version-mismatch"
 ```
 
-`LLM_REASONING_MODEL`: the model the search's ONE judgement per loop point goes to
--- the node oracle that values every room from the whole map (the probability, per
-node, that the target is in the part of it not checked yet). **Since 2026-11-16
-the oracle's prompt holds no rule of judgement and is a named VERSION tuned per
-model** (`core/mapping/topology/search_node_prompts.py`): the default version,
-`facts-qwen2.5-3b-v1`, is tuned on `qwen2.5:3b-instruct`, the model a laptop can
-hold and, since the same day, this launcher's default (`benchmark_services.sh`).
-`qwen2.5:14b-instruct` is the model of the runs measured before that date; it
-has no version of its own yet, so a run on it uses the 3B's wording and says so at
-start-up and in its record (`node_oracle.model.prompt_tuned_on_it: false`) -- tune
-one first (`tests/probe_node_oracle.py --prompt <version>`), then select it with
-`{"room_search": {"oracle_prompt": "<version>"}}` in the policy config. The 14B
-answers a four-node prompt in about a minute on a
-laptop's CPU (32 threads, no GPU) when it has the RAM (about 10.5 GB: check the
-Ollama container's memory limit first). `qwen2.5:32b-instruct` (~20 GB at Q4, several
-minutes per call) is better still but does not fit beside Habitat in 30 GB of RAM; use
-it on a box with more, or a hosted model via `LLM_BACKEND=openai`. Give the call a long
-`LLM_REASONING_TIMEOUT_S`: the search waits for the answer rather than running on a
-guess. Both models must be provisioned -- the health check looks for each and refuses
-to run otherwise; nothing falls back to the small model unannounced.
-`LLM_TIMEOUT_S=120`: the CPU model needs ~2 s per room in the prompt, and a building can have
-14 rooms. `--allow-sim-version-mismatch` acknowledges habitat-sim 0.2.4 against the protocol's
+RPT needs one **vision** model; `LLM_REASONING_MODEL` is not used. Preflight
+sends a boxed image and requires a numeric probability. Frames are kept in RAM
+unless `OBJNAV_FRAME_LOG_DIR` names a directory for persistence. Use a fresh run
+directory: this is a different method from the historical room-label/oracle runs.
+For a paired run use `--agent rpt_room_llm` on the same episode IDs, seed and
+perception mode, in a new output directory. The benchmark launcher then uses
+the original text routes (`LLM_MODEL` and `LLM_REASONING_MODEL`, both default
+to `qwen2.5:3b-instruct` in the launchers). Unset any visual-model overrides.
+Use **that agent's** `--print-vocabulary` to start its full-vocabulary detector;
+for visual RPT this is an allowlist, and `/detect/scoped` applies only the
+current episode's goal aliases plus stairs under the inference lock.
+With `--perception ground-truth` no detector service is needed by either arm.
+`--agent falcon-yolo` remains the goal-free FALCON baseline.
+`--allow-sim-version-mismatch` acknowledges habitat-sim 0.2.4 against the protocol's
 reference 0.1.5. Add `--allow-shared-gpu` to `RUN_FLAGS` when GPU 0 also drives a desktop
 (the run otherwise refuses a card with > 512 MiB already in use). `--detector-backend`
 defaults to `yolo_world`.
@@ -274,8 +282,8 @@ The second footer line shows persistent target lock separately from current visi
 phase, target range (remembered during occlusion, distinct from evaluator DTG), elapsed
 time and FPS. The confirmed path continues through occlusion; terminal inspection
 stops translation at 1.0 m and requires fresh visual evidence for STOP. `steps.jsonl` includes
-`control_counters` for room LLM, room classifier, RPT* and A* calls, allowing an
-audit that global reasoning really freezes during closing.
+`control_counters` for frontier VLM, RPT* and A* calls. Scoring continues during
+closing, but does not take control of motion.
 
 After video finalization, `EPISODE COMPLETE` immediately prints the absolute video
 path, SR, SPL, DTG, runtime and average execution FPS, then pauses for the requested
@@ -295,7 +303,7 @@ the original recording and empty/incomplete benchmark ledger.
 ```bash
 "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.distinct_buildings \
     --manifest "$MANIFEST" --output "$HOME/objnav_benchmark/campaign" \
-    --explorers frontier --record-first $RUN_FLAGS
+    --agent rpt --explorers frontier --record-first $RUN_FLAGS
 ```
 
 Every job is preflighted and locked (`locks/`, `campaign.json`) before any rendering, then run
@@ -364,13 +372,12 @@ explicitly with `gibson.run --scene <Scene> --limit 1 --shards 200 --shard-index
 | `Rendering GPU is occupied` | stop the other GPU process, or add `--allow-shared-gpu` (recorded in the run identity) |
 | `unable to find CUDA device 0 among N EGL devices in total` | the NVIDIA EGL library cannot see the card (a driver upgrade under the running kernel module: `nvidia-smi` says `Driver/library version mismatch`). Reboot, or render on the CPU meanwhile: `GPU_PLAN=off HABITAT_RENDER=software run_benchmark.sh …` (or `--software-render` to `gibson.run` under `unshare -rm sh -c 'mount -t tmpfs none /dev/dri && exec "$@"' _ …`); recorded as `renderer` in `run.json` |
 | `Reference habitat-sim is 0.1.5; installed '0.2.4'` | `--allow-sim-version-mismatch` |
-| `Requested LLM model ... is not provisioned` | `OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5:3b-instruct`; check `LLM_BASE_URL` |
+| `Requested LLM model ... is not provisioned` | `OLLAMA_HOST=127.0.0.1:11435 ollama pull qwen2.5vl:7b`; check `LLM_BASE_URL` |
 | `Detector emission threshold hides door candidates` | restart the service with `--conf 0.05` |
 | `No working FFmpeg: set IMAGEIO_FFMPEG_EXE` (`--record`) | the resolver tries `PATH`, then `ffmpeg` beside the interpreter; a conda `ffmpeg` can be present yet unloadable (`libiconv.so.2` missing in `objnav-habitat`). Point `IMAGEIO_FFMPEG_EXE` at any ffmpeg with `libx264` (e.g. another conda env's) or `apt install ffmpeg` |
 | vocabulary / backend mismatch on `/health` | restart the service with `--classes "$VOCAB"` from `--print-vocabulary` and `--backend yolo_world` |
-| `Room oracle failed` in an episode | raise `LLM_TIMEOUT_S`; the run now keeps exploring through it (see `exploration_fallback` in the record) |
+| `frontier_vlm` failure in an episode | Check the server, timeout and response schema. The ledger leaves the node pending and the fallback back-off bounds retries. |
 
 Deeper reading: [runtime architecture](README.md), [Gibson protocol and data](gibson/README.md),
 [multi-story protocol and ground-truth stairs](gibson/MULTISTORY.md),
 [detector service](../../mapping/scene_graph/serve/README.md), and `LESSONS.md` at the repo root.
-

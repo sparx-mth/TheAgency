@@ -16,7 +16,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_gibson import LineSimulator
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import setup_policy, observation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.visualization import method_snapshot, render_dashboard
-from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy
+from sparx_agency.core.planning.object_search.policy import LegacyRoomSearchPolicy
 
 
 def test_selection_is_distinct_deterministic_and_order_independent():
@@ -134,7 +134,7 @@ def test_each_building_has_both_recorded_jobs_with_fixed_action_protocol(tmp_pat
 
 def test_falcon_recording_shows_actual_phase_and_renders():
     old, episode = setup_policy("bed")
-    policy = RPTSearchPolicy(old.detector, old.llm_client, replace(old.settings, local_exploration="falcon"))
+    policy = LegacyRoomSearchPolicy(old.detector, old.llm_client, replace(old.settings, local_exploration="falcon"))
     policy.reset(episode, old.target)
     obs = observation(episode, 0, depth=3)
     command = policy.plan(obs)

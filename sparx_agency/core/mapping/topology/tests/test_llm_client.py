@@ -275,6 +275,28 @@ def test_unknown_backend_raises():
         client.chat_text("s", "u")
 
 
+@pytest.mark.parametrize("backend", ["ollama", "openai-compat"])
+def test_multimodal_request_carries_the_actual_jpeg_and_bounded_options(backend):
+    import base64
+    reply = (_ollama_reply if backend == "ollama" else _openai_reply)('{"probability":0.35}')
+    client = _client(backend, [reply], model="vl", num_ctx=4096, num_batch=256, max_tokens=32)
+    jpeg = b"\xff\xd8boxed frontier\xff\xd9"
+    assert client.chat_json("S", "target", image_jpeg=jpeg) == {"probability": 0.35}
+    payload = client.sess.posts[0]["payload"]
+    user = payload["messages"][1]
+    if backend == "ollama":
+        encoded, = user["images"]
+        assert user["content"] == "target"
+        assert {k: payload["options"][k] for k in ("num_ctx", "num_batch", "num_predict")} == {
+            "num_ctx": 4096, "num_batch": 256, "num_predict": 32}
+    else:
+        text, image = user["content"]
+        assert text == {"type": "text", "text": "target"} and payload["max_tokens"] == 32
+        prefix, encoded = image["image_url"]["url"].split(",")
+        assert prefix == "data:image/jpeg;base64"
+    assert payload["model"] == "vl" and base64.b64decode(encoded) == jpeg
+
+
 def test_temperature_override_per_call():
     client = _client("ollama", [_ollama_reply('{}')])
     client.chat_json("s", "u", temperature=0.9)

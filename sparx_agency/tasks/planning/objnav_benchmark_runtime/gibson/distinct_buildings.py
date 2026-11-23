@@ -38,7 +38,7 @@ def jobs_for(scenes, explorers=("frontier", "falcon")):
 
 def command_for(args, backend, scene):
     command = ["--manifest", str(args.manifest.resolve()), "--scene", scene,
-               "--output", str(args.output / backend / scene), "--explorer", backend,
+               "--output", str(args.output / backend / scene), "--agent", getattr(args, "agent", "rpt_room_llm"), "--explorer", backend,
                "--seed", str(args.seed), "--record", "--video-fps", str(args.video_fps)]
     command += detector_flags(args)
     if getattr(args, "record_first", False):
@@ -139,7 +139,8 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--video-fps", type=int, default=6)
     parser.add_argument("--policy-config", type=Path)
-    parser.add_argument("--explorers", nargs="+", choices=("frontier", "falcon"), default=["frontier", "falcon"])
+    parser.add_argument("--agent", choices=("rpt", "rpt_room_llm"), default="rpt_room_llm")
+    parser.add_argument("--explorers", nargs="+", choices=("frontier", "falcon"), default=None)
     parser.add_argument("--record-first", action="store_true")
     parser.add_argument("--allow-sim-version-mismatch", action="store_true")
     parser.add_argument("--allow-shared-gpu", action="store_true",
@@ -147,12 +148,16 @@ def main(argv=None):
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--summarize-only", action="store_true")
     args = parser.parse_args(argv)
+    if args.explorers is None:
+        args.explorers = ["frontier"] if args.agent == "rpt" else ["frontier", "falcon"]
+    if args.agent == "rpt" and args.explorers != ["frontier"]:
+        parser.error("Visual RPT has only the frontier explorer")
     if args.job_timeout_s <= 0:
         parser.error("--job-timeout-s must be positive")
     data = json.loads(args.manifest.read_text())
     if data.get("schema") not in (SCHEMA, MULTIFLOOR_SCHEMA) or len(data["scenes"]) != len(set(data["scenes"])):
         raise ValueError("Need a distinct-building generated training manifest")
-    if data["schema"] == SCHEMA and set(args.explorers) != {"frontier", "falcon"}:
+    if args.agent == "rpt_room_llm" and data["schema"] == SCHEMA and set(args.explorers) != {"frontier", "falcon"}:
         raise ValueError("The legacy comparison requires both explorers; single-explorer campaigns use --multistory data")
     if args.summarize_only:
         finish(args.output, data)
@@ -187,4 +192,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
-

@@ -246,7 +246,8 @@ def prepare(args):
 def main(argv=None, *, configuration_guard=None):
     args = parser().parse_args(argv)
     if args.print_vocabulary:
-        print(",".join(gibson_label_mapper().vocabulary()))
+        from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import detector_vocabulary
+        print(",".join(detector_vocabulary(args.agent, gibson_label_mapper())))
         return 0
     if args.resume and args.output is None:
         parser().error("--resume requires --output")
@@ -314,4 +315,3 @@ def main(argv=None, *, configuration_guard=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

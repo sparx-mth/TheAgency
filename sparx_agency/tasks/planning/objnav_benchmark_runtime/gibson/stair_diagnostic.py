@@ -100,7 +100,7 @@ def main(argv=None):
     parser.add_argument("--policy-config", type=Path)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--gpu-device", type=int, default=0)
-    parser.set_defaults(agent="rpt", allow_shared_gpu=False)
+    parser.set_defaults(agent="rpt_room_llm", allow_shared_gpu=False)  # this diagnostic explicitly tests traversal
     args = parser.parse_args(argv)
     if not 1 <= args.steps <= 500 or args.start_step < 0 or not 1 <= args.transitions <= 4 or not 1 <= args.display_floors <= 16:
         raise ValueError("Invalid bounded diagnostic selection")
@@ -109,4 +109,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
-

@@ -57,12 +57,11 @@ cd "$SNAPSHOT"
 export OBJNAV_REPO="$SNAPSHOT" RUNS_ROOT
 export HAB_PY="${HAB_PY:-$HOME/miniconda3/envs/habitat/bin/python}"
 export OLLAMA_MODE="${OLLAMA_MODE:-native}" LLM_BASE_URL="${LLM_BASE_URL:-http://127.0.0.1:11434}"
-export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b-instruct}" LLM_REASONING_MODEL="${LLM_REASONING_MODEL:-qwen2.5:3b-instruct}"
 export LLM_ANSWERS_RECORD="$STORE"
 # REPLAY (os.pathsep-separated directories) serves earlier runs' answers when this run records elsewhere: two runs that
 # may hold the same episode at the same time must not record into one directory (LESSONS.md 2026-11-10).
 [[ -n "${REPLAY:-}" ]] && export LLM_ANSWERS_REPLAY="$REPLAY"
-export GPU_PLAN_LLM="${GPU_PLAN_LLM:-gpu}" LLM_VRAM_MIB="${LLM_VRAM_MIB:-0}" HABITAT_VRAM_MIB="${HABITAT_VRAM_MIB:-1100}"
+export HABITAT_VRAM_MIB="${HABITAT_VRAM_MIB:-1100}"
 export ALLOW_SHARED_GPU="${ALLOW_SHARED_GPU:-1}"
 echo "campaign $NAME: set $SET, store $STORE, output $OUTPUT, jobs $JOBS, snapshot $SNAPSHOT"
 exec "$SNAPSHOT/sparx_agency/tasks/planning/objnav_benchmark_runtime/mp3d/run_benchmark.sh" \

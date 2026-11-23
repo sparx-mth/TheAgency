@@ -576,7 +576,7 @@ class SpawnFloorGuard:
         if provisional and self.spawn_floor == int(mapping.floor_id):
             self.spawn_z = height
             building = getattr(self.policy, "building", None)
-            if building is not None and building.flights_seen_from_spawn:
+            if building is not None and building.flights_seen_from_spawn and building.switch is not None:
                 # A step off a flight onto the floor: the flight's other end is the switch's storey (spawn_switch.py).
                 building.switch.settled(obs, int(mapping.floor_id), plane, height, "remeasure")
         self._level_heights = []

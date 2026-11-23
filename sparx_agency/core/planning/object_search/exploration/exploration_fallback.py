@@ -410,11 +410,12 @@ class ExplorationFallback:
         if cost is None:
             cost = assemble_cost_grid(p.planner.fields_for(world), p.planner_params, p.planner_params.inflate_floor_m)[0]
         ids, graph = passable_graph(cost)                    # one graph for the ranking and the relocation
-        inventory = p.graph.frontier_inventory
+        inventory = self._inventory()
         ranked = (list(inventory.goals) if inventory is not None else
                   ranked_frontier_goals(world, cost, np.ones(world.grid.shape, bool),
                                         (obs.pose.x, obs.pose.y), obs.pose.yaw, p.sweep.settings.ranking,
                                         ids=ids, graph=graph))
+        ranked = self._unblocked(ranked)
         admissible = p.sweep.admissible(obs, world, ranked)
         if self.goal is not None and obs.step - self.goal_step > self.settings.goal_memory_actions:
             self.goal = self.goal_stage = None                # the loop walked the agent elsewhere: no stale pull
@@ -427,18 +428,9 @@ class ExplorationFallback:
         command = self._frontiers(obs, planning, exits, "frontier")
         if command is not None:
             return self._tag(command, "frontier", reason)
-        if p.building is not None:
-            if not p.building.can_leave_floor(obs):
-                # No frontier does not prove a room was entered. Complete a
-                # reachable outstanding peek, even outside the local trigger
-                # radius or when opportunistic inspections were disabled.
-                command = p.peek.plan(obs, world, force=True)
-                if command is not None:
-                    p._action_owner = "doorway_peek"
-                    return self._tag(command, "room_peek", reason)
-            command = p.building.plan(obs, world, exhausted=True)
-            if command is not None:
-                return self._tag(command, "stairs", reason)
+        command = self._floor_exit(obs, world, reason)
+        if command is not None:
+            return command
         # An EXIT reachable at the body radius before any shadow, sliver or retired goal at the floor
         # rung (since 2026-10-28): the doorway the map draws 0.5 m wide is still the way to the rooms
         # not yet seen, and the GT-oracle sweep of 2026-10-26 walked to the strips behind beds first.
@@ -484,6 +476,22 @@ class ExplorationFallback:
         return NavigationCommand.hold(info={"kind": "fallback_hold", "fallback": reason,
                                             "reason": "off the observed passable map; the idle turn is the only move"})
 
+    def _inventory(self):
+        return self.policy.graph.frontier_inventory
+
+    def _floor_exit(self, obs, world, reason):
+        p = self.policy
+        if p.building is not None:
+            if not p.building.can_leave_floor(obs):
+                command = p.peek.plan(obs, world, force=True)
+                if command is not None:
+                    p._action_owner = "doorway_peek"
+                    return self._tag(command, "room_peek", reason)
+            command = p.building.plan(obs, world, exhausted=True)
+            if command is not None:
+                return self._tag(command, "stairs", reason)
+        return None
+
     def _try_goals(self, obs, world, goals):
         """The first goal the planner accepts, as ``(command, goal_xy)``; ``(None, None)`` when none is."""
         p = self.policy
@@ -492,6 +500,11 @@ class ExplorationFallback:
             if command is not None:
                 return command, tuple(goal)
         return None, None
+
+    def _unblocked(self, ranked):
+        """The retired-goal rung may retry bumps, but not a frontier the visual ledger has declared blocked."""
+        blocked = getattr(getattr(self.policy, "frontiers", None), "blocked_cells", None)
+        return [g for g in ranked if g.cell not in blocked] if blocked else ranked
 
     def _squeeze(self, obs, planning, world, exits_only=False):
         """Rung 4b (since 2026-10-25): the frontier goals reachable at the BODY radius only, through the squeeze planner.
@@ -523,7 +536,7 @@ class ExplorationFallback:
         ranked = ranked_frontier_goals(world, cost, np.ones(world.grid.shape, bool),
                                        (obs.pose.x, obs.pose.y), obs.pose.yaw, p.sweep.settings.ranking,
                                        ids=ids, graph=graph)
-        admissible = p.sweep.admissible(obs, world, ranked)
+        admissible = p.sweep.admissible(obs, world, self._unblocked(ranked))
         if exits_only:
             if not self.settings.exits_first:
                 return None
@@ -625,17 +638,18 @@ class ExplorationFallback:
 
     def _reveals_a_room(self, obs, world):
         """The shadow exemption: ``goal -> bool`` (:func:`shadow_exemption`), or None without the pose or the ray caster."""
-        loop = getattr(self.policy, "loop", None)
-        if obs is None or loop is None or not hasattr(loop, "_unknown_view"):
+        gain = getattr(self.policy, "loop", None)
+        if obs is None or not hasattr(gain, "_unknown_view"):
             return None
-        return shadow_exemption(loop._unknown_view(obs, world), self.settings)
+        return shadow_exemption(gain._unknown_view(obs, world), self.settings)
 
     def _min_gain_m2(self):
         """The significance threshold in force: the setting, else the loop's ``explore_min_gain_m2``."""
         if self.settings.min_gain_m2 is not None:
             return float(self.settings.min_gain_m2)
         loop = getattr(self.policy, "loop", None)
-        return float(getattr(getattr(loop, "settings", None), "explore_min_gain_m2", 0.0) or 0.0)
+        settings = getattr(loop, "settings", getattr(self.policy, "loop_settings", None))
+        return float(getattr(settings, "explore_min_gain_m2", 0.0) or 0.0)
 
     def _by_view_gain(self, obs, world, goals):
         """``(ranked, slivers)``: the exits re-scored by the unknown floor a look from each would reveal, best first.
@@ -729,6 +743,3 @@ class ExplorationFallback:
         return {"settings": asdict(self.settings), "stats": dict(self.stats),
                 "failures": list(self.failures), "retry_step": dict(self.retry_step),
                 "last_demoted": list(self.last_demoted)}
-
-
-

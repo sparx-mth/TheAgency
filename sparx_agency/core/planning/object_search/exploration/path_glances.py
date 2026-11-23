@@ -365,7 +365,7 @@ class GlanceScheduler:
             return command
         if not self._may_glance(obs):
             return command
-        cue = self._cue(obs, world)
+        cue = self._cue(obs, world) if self.settings.cue_enabled else None
         if cue is not None:
             return self._start_cue(obs, cue)
         if not self.settings.geometric_enabled:

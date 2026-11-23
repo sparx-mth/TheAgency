@@ -2,7 +2,7 @@
 
 Run with PYTHONPATH pointing to an existing RoboTHOR adapter checkout. This file
 is shared detector test tooling, not a fork of the adapter or navigation policy.
-The room-language service is explicitly a deterministic fixture: loading a cold
+The legacy room-reasoning service is explicitly a deterministic fixture: loading a cold
 GPU LLM alongside the simulator is unsafe on this host. No benchmark SR/SPL is
 computed, and zero false STOPs in a short run is not a precision claim.
 """
@@ -13,18 +13,7 @@ from dataclasses import asdict
 import gzip
 import json
 from pathlib import Path
-import re
 from types import SimpleNamespace
-
-
-class RoomServiceFixture:
-    """Same schema as the existing test_method FakeLLM, without importing pytest."""
-
-    def chat_json(self, system, user):
-        if "Room observed objects" in user:
-            return {"label": "living_room", "confidence": .8, "reasoning": "smoke fixture"}
-        return {"rooms": [{"id": int(pid), "score": 50, "why": "smoke fixture"}
-                          for pid in re.findall(r"id=(\d+)", user)]}
 
 
 def run_smoke(args):
@@ -35,7 +24,9 @@ def run_smoke(args):
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.robothor.protocol import PROTOCOL
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.robothor.run import _simulator, _gpu_gate, embodiment
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
-    from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy, RPTSettings
+    from sparx_agency.core.planning.object_search.rooms.legacy_policy import LegacyRoomSearchPolicy
+    from sparx_agency.core.planning.object_search.settings import RPTSettings
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.stub_llm import StubLLMClient
     from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import source_fingerprint
 
     if not args.scene.startswith("FloorPlan_Train") or not 1 <= args.steps <= 50:
@@ -54,7 +45,7 @@ def run_smoke(args):
     if identity["metadata"].get("backend") != args.backend:
         raise ValueError("Smoke endpoint is not the requested backend")
     settings = RPTSettings(**dict(embodiment(), detection_confidence=args.confidence))
-    policy = RPTSearchPolicy(detector, RoomServiceFixture(), settings)
+    policy = LegacyRoomSearchPolicy(detector, StubLLMClient(), settings)
     agent = HeadlessObjNavAgent(policy, mapper)
     episode = ObjNavEpisode("detector-smoke/" + args.scene, args.scene,
                             "detector-development", "train", category,

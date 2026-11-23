@@ -13,6 +13,7 @@ service, a malformed reply for one frame) is the same error class raised
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 
 import numpy as np
@@ -25,9 +26,11 @@ from sparx_agency.tasks.mapping.scene_graph.serve.contract import detections_fro
 
 class HttpDetector:
     """Pin vocabulary/model/configuration without reconfiguring shared services."""
-    def __init__(self, url, vocabulary, timeout_s=30.0, expected_backend=None):
+    def __init__(self, url, vocabulary, timeout_s=30.0, expected_backend=None, *, episode_scoped=False):
         self.url = url.rstrip("/")
         self.vocabulary = tuple(vocabulary)
+        self.episode_scoped = episode_scoped
+        self._episode_prompts = None
         if not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError("Detector timeout must be finite and positive")
         self.timeout_s = float(timeout_s)
@@ -45,6 +48,8 @@ class HttpDetector:
         data = response.json()
         if not data.get("ok") or tuple(data.get("classes", ())) != self.vocabulary:
             raise ObjNavInternalError("Detector vocabulary mismatch; configure a dedicated service with the benchmark's --print-vocabulary output, in that exact order")
+        if self.episode_scoped and data.get("scoped_prompts") is not True:
+            raise ObjNavInternalError("Visual RPT requires a YOLO-World server with request-scoped prompts")
         metadata = data.get("metadata", {})
         if self.expected_backend is not None and metadata.get("backend") != self.expected_backend:
             raise ObjNavInternalError("Detector backend differs from the explicitly requested backend")
@@ -56,6 +61,12 @@ class HttpDetector:
         self._identity = identity
         return identity
 
+    def set_episode_prompts(self, prompts):
+        if not prompts or not set(prompts) <= set(self.vocabulary):
+            raise ObjNavInternalError("Episode prompts exceed the configured detector vocabulary")
+        self.episode_scoped = True
+        self._episode_prompts = tuple(prompts)
+
     def detect(self, rgb):
         self.last_detections, self.last_diagnostics = (), {}
         try:
@@ -64,13 +75,23 @@ class HttpDetector:
                 # which are checked below, so a GET per frame bought nothing.
                 self.health()
             body = encode_frame(np.ascontiguousarray(rgb[..., ::-1]))
-            response = self.session.post(self.url + "/detect", data=body,
-                                         headers={"Content-Type": "image/jpeg"}, timeout=self.timeout_s)
+            classes = self.vocabulary
+            headers = {"Content-Type": "image/jpeg"}
+            path = "/detect"
+            if self.episode_scoped:
+                if self._episode_prompts is None:
+                    raise ObjNavInternalError("Target-scoped detector used before episode reset")
+                path, classes = "/detect/scoped", self._episode_prompts
+                headers["X-Detection-Classes"] = json.dumps(classes)
+            response = self.session.post(self.url + path, data=body, headers=headers, timeout=self.timeout_s)
+            if self.episode_scoped and getattr(response, "status_code", None) in (400, 404):
+                self.health()  # a rejected subset can be a changed server identity, not a recoverable frame failure
             response.raise_for_status()
             data = response.json()
             if not isinstance(data, dict):
                 raise DetectorFrameError("Detector reply is not a JSON object")
-            if tuple(data.get("classes", ())) != self.vocabulary or data.get("metadata") != self._identity["metadata"]:
+            if (tuple(data.get("classes", ())) != classes or data.get("metadata") != self._identity["metadata"]
+                    or (self.episode_scoped and tuple(data.get("server_classes", ())) != self.vocabulary)):
                 # Identity drift: another vocabulary, model or configuration is answering.
                 raise ObjNavInternalError("Detector service failed: Detector was reconfigured during inference "
                                           "(vocabulary or model configuration changed)")
@@ -88,11 +109,13 @@ class HttpDetector:
             except (KeyError, TypeError, ValueError) as exc:
                 raise DetectorFrameError("Malformed detections in the reply: %s" % exc) from exc
             for detection in detections:
-                if (detection.cls not in self.vocabulary or not math.isfinite(detection.conf)
+                if (detection.cls not in classes or not math.isfinite(detection.conf)
                         or not 0 <= detection.conf <= 1 or not all(math.isfinite(v) for v in detection.xyxy)):
                     raise DetectorFrameError("Invalid detection or unexpected vocabulary")
             self.last_detections = tuple(detections)
             self.last_diagnostics = dict(diagnostics, request_sha256=request_hash) if diagnostics else {}
+            if self.episode_scoped:
+                self.last_diagnostics.update(mode="target_and_stairs", classes=list(classes), request_sha256=request_hash)
             self.last_inference_ms = data.get("ms")
             self.last_peak_rss_mib = data.get("peak_rss_mib")
             return detections
@@ -100,4 +123,3 @@ class HttpDetector:
             raise
         except (requests.RequestException, DetectorFrameError, ValueError, KeyError) as exc:
             raise ObjNavInternalError("Detector service failed: %s" % exc) from exc
-

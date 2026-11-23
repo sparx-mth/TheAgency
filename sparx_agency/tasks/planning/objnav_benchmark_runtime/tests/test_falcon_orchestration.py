@@ -12,14 +12,14 @@ from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_labe
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.object_search.falcon.regions import ObservedRegions
-from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy
+from sparx_agency.core.planning.object_search.policy import LegacyRoomSearchPolicy
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_falcon import open_fixture
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 
 
 def rig(monkeypatch, **settings):
     old, episode = setup_policy("bed")
-    policy = RPTSearchPolicy(old.detector, old.llm_client,
+    policy = LegacyRoomSearchPolicy(old.detector, old.llm_client,
                              replace(old.settings, local_exploration="falcon", falcon=FalconParams(**settings)))
     agent = HeadlessObjNavAgent(policy, gibson_label_mapper())
     agent.reset(episode)
@@ -185,4 +185,3 @@ def test_capacity_and_extra_action_rejection_do_not_mutate_ledgers():
     with pytest.raises(RuntimeError, match="Local burst"):
         machine.charge(1)
     assert machine.snapshot() == before
-

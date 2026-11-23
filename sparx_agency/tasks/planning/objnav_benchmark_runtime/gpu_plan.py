@@ -53,6 +53,8 @@ from pathlib import Path
 import subprocess
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from sparx_agency.core.mapping.topology.llm_client import DEFAULT_VISION_MODEL
+
 #: Explicit VRAM estimates (MiB), measured on the development workstation 2026-10-08, the LLM's re-measured 2026-10-22.
 #: Ollama: resident Q4 weights x 1.25 -- one request slot's 8k KV cache plus compute buffers for both models, measured
 #: 12.6 GB for qwen2.5:3b-instruct + qwen2.5:14b-instruct (1.21 x their 10.4 GB of weights) on the 4090 with the server's
@@ -63,6 +65,10 @@ LLM_OVERHEAD_FACTOR = 1.25
 #: measured 2026-10-22 on the 4090 as 1.7 GB per slot for qwen2.5:14b-instruct and 0.44 GB for qwen2.5:3b-instruct
 #: with OLLAMA_CONTEXT_LENGTH=8192 -- about 0.21 of the Q4 weights either way.
 LLM_SLOT_FACTOR = 0.21
+# Conservative cold-start estimates for the default Q4_K_M tag, not measured peak VRAM.
+# Use the manifest's actual weight size once pulled. The vision encoder also needs image-prefill scratch.
+VLM_WEIGHT_ESTIMATE_MIB = 6144
+VLM_VISION_WORKSPACE_MIB = 1536
 YOLO_WORLD_X_MIB = 2048          # YOLO-World X-v2 + CLIP ViT-B/32 text encoder, 640x480 inference, fp32
 HABITAT_RENDER_MIB = 1536        # habitat-sim 0.2.4 headless, one agent, 640x480 RGB-D (observed 1.3 GB)
 DEFAULT_RESERVE_MIB = 512        # the display / driver headroom the ``gibson.run`` GPU gate also keeps
@@ -183,6 +189,9 @@ def llm_need_mib(models: Sequence[str], models_dir: Path, override: Optional[int
     if override is not None:
         return int(override), "LLM_VRAM_MIB override"
     sizes = {name: ollama_model_mib(models_dir, name) for name in dict.fromkeys(models)}
+    estimated = DEFAULT_VISION_MODEL in sizes and sizes[DEFAULT_VISION_MODEL] is None
+    if estimated:
+        sizes[DEFAULT_VISION_MODEL] = VLM_WEIGHT_ESTIMATE_MIB
     missing = [name for name, size in sizes.items() if size is None]
     if missing:
         raise RuntimeError("No Ollama manifest for %s under %s; pull the model or set LLM_VRAM_MIB"
@@ -190,8 +199,12 @@ def llm_need_mib(models: Sequence[str], models_dir: Path, override: Optional[int
     weights = sum(sizes.values())
     factor = LLM_OVERHEAD_FACTOR + LLM_SLOT_FACTOR * (parallel - 1)
     slots = "" if parallel == 1 else ", %d request slots" % parallel
-    return int(round(weights * factor)), "%s weights %d MiB x %.2f%s" % (
-        " + ".join("%s %d" % item for item in sizes.items()), weights, factor, slots)
+    need = int(round(weights * factor))
+    note = "%s weights %d MiB x %.2f%s" % (" + ".join("%s %d" % item for item in sizes.items()), weights, factor, slots)
+    if DEFAULT_VISION_MODEL in sizes:
+        need += VLM_VISION_WORKSPACE_MIB
+        note += " + %d MiB vision workspace%s" % (VLM_VISION_WORKSPACE_MIB, " (estimated weights before pull)" if estimated else "")
+    return need, note
 
 
 def components(llm_mib: int, llm_note: str, yolo_mib: int = YOLO_WORLD_X_MIB, habitat_mib: int = HABITAT_RENDER_MIB,
@@ -293,11 +306,17 @@ def plan_from_environment(gpu_index: int = 0, run: Callable[[Sequence[str]], str
     """
     env = os.environ if env is None else env
     name, total, used = nvidia_smi_memory(gpu_index, run)
-    models = [env.get("LLM_MODEL", "qwen2.5:3b-instruct"), env.get("LLM_REASONING_MODEL", "qwen2.5:14b-instruct")]
+    models = ([env.get("LLM_MODEL", "qwen2.5:3b-instruct"), env.get("LLM_REASONING_MODEL", "qwen2.5:3b-instruct")]
+              if env.get("OBJNAV_AGENT_VARIANT") == "rpt_room_llm" else [env.get("LLM_MODEL", DEFAULT_VISION_MODEL)])
     models_dir = Path(env.get("OLLAMA_MODELS_DIR", env.get("OLLAMA_MODELS", "~/models/objnav/ollama")))
     override = env.get("LLM_VRAM_MIB")
     llm_mib, note = llm_need_mib(models, models_dir, int(override) if override else None,
                                  int(env.get("OLLAMA_NUM_PARALLEL", "1") or 1))
+    servers = int(env.get("OBJNAV_VLM_SERVERS", "1"))
+    if servers < 1:
+        raise ValueError("OBJNAV_VLM_SERVERS must be positive")
+    if servers > 1 and not override:
+        llm_mib, note = llm_mib * servers, "%d model servers x (%s)" % (servers, note)
     parts = components(llm_mib, note, int(env.get("YOLO_VRAM_MIB", YOLO_WORLD_X_MIB)),
                        int(env.get("HABITAT_VRAM_MIB", HABITAT_RENDER_MIB)),
                        env.get("HABITAT_CPU_RENDER", "0") == "1", pins_from_environment(env),

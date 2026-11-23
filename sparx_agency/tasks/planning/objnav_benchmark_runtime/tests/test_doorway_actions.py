@@ -163,7 +163,9 @@ def test_peek_evidence_flows_through_classifier_oracle_and_real_rpt_star():
             self.calls.append((user, kwargs))
             if "Room observed objects" in user:
                 return {"label": "bathroom" if "sink" in user else "living_room", "confidence": 0.9}
-            assert "type=bathroom?" in user and "seen: sink" in user
+            # The labeller sees the sink; the current oracle prompt lists objects only for an unlabelled room.
+            assert "id=1  ROOM  type=bathroom?" in user
+            assert any("Room observed objects" in prompt and "sink" in prompt for prompt, _ in self.calls)
             assert kwargs.get("reasoning") is True
             return {"nodes": [{"id": 0, "p": 2, "why": "living room"},
                               {"id": 1, "p": 95, "why": "bathroom clue"}]}

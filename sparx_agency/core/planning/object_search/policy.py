@@ -1,4 +1,4 @@
-"""Observed-only ObjectNav with persistent floors and frontier or planar FALCON.
+"""Observed-only ObjectNav with persistent floors and VLM-scored frontier navigation.
 
 **The agent is given no scene geometry.** What it knows of the building is
 what its own RGB-D and pose have measured: the occupancy map, the storeys it
@@ -43,49 +43,53 @@ from sparx_agency.core.planning.exploration.falcon.params import SOURCE as FALCO
 from sparx_agency.core.planning.interfaces.planner import PlanRequest
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.objnav.action_converter.params import ActionConverterParams
+from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
+from sparx_agency.core.planning.objnav.errors import ObjNavInternalError
+from sparx_agency.core.planning.object_search.frame_log.episode_frame_log import EpisodeFrameLog
+from sparx_agency.core.planning.object_search.frame_log.memory_store import MemoryFrameStore
+from sparx_agency.core.planning.object_search.frontier_views.nodes import NodeSettings
+from sparx_agency.core.planning.object_search.frontier_views.scoring import PROMPT_VERSION
+from sparx_agency.core.planning.object_search.frontier_views.search import FrontierSearch
+from sparx_agency.core.planning.object_search.frontier_views.settings import ViewSettings
 from sparx_agency.core.planning.planners.astar.cost_grid_2d import assemble_cost_grid
 from sparx_agency.core.planning.planners.astar.weighted_planner_2d import WeightedAStarPlanner2D
+from sparx_agency.core.planning.planners.common.grid_geometry_2d import line_of_sight_clear
 from sparx_agency.core.planning.object_search.world_model.observed_map import ObservedMap
-from sparx_agency.core.planning.object_search.rooms.scene_graph import DEFAULT_SEGMENTATION
-from sparx_agency.core.planning.object_search.perception.doors import DoorSettings
-from sparx_agency.core.mapping.topology.revisable_room_labels import RoomLabelSettings
 from sparx_agency.core.planning.object_search.route_memory import CommittedRoute, RouteSettings
-from sparx_agency.core.mapping.objects.target_evidence import TargetEvidenceSettings
 from sparx_agency.core.planning.object_search.exploration.escape_probe import EscapeProbe, EscapeSettings
-from sparx_agency.core.planning.object_search.exploration.exploration_fallback import ExplorationFallback, FallbackSettings
-from sparx_agency.core.planning.object_search.rooms.floor_context import FloorContextBank
+from sparx_agency.core.planning.object_search.exploration.exploration_fallback import FallbackSettings
+from sparx_agency.core.planning.object_search.exploration.geometric_fallback import GeometricFallback
+from sparx_agency.core.planning.object_search.exploration.warmup import rotation_command
 from sparx_agency.core.planning.object_search.interfaces import ground_truth_semantics
 from sparx_agency.core.planning.object_search.exploration.frontier_sweep import FrontierSweep, SweepSettings
-from sparx_agency.core.planning.object_search.rooms.opening_nodes import OpeningRegistry
 from sparx_agency.core.planning.object_search.exploration.path_glances import GlanceScheduler, GlanceSettings
-from sparx_agency.core.planning.object_search.world_model.peek_stairs import stair_peek_mask
 from sparx_agency.core.planning.object_search.world_model.map_ledger import MapChangeLedger
-from sparx_agency.core.mapping.topology.room_extent import ExtentParams
-from sparx_agency.core.mapping.topology.search_node_prompts import prompt_version
-from sparx_agency.core.planning.object_search.rooms.room_scans import RoomScanLedger
 from sparx_agency.core.planning.object_search.world_model.sightlines import SightLedger, SightSettings
 from sparx_agency.core.planning.object_search.multifloor.spawn_floor_guard import SpawnFloorGuard
-from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
-from sparx_agency.core.planning.object_search.exploration.doorway_peek import DoorwayPeek
 from sparx_agency.core.planning.object_search.navigation import (BottleneckLookDown, DoorwayScrapeGuard,
                                                                   KinematicFollower)
-from sparx_agency.core.planning.object_search.rooms.discovery import SUSPENDED_PHASES, discover
 from sparx_agency.core.planning.object_search.settings import RPTSettings
 from sparx_agency.core.planning.object_search.exploration.exploration_metrics import ExplorationMetrics
 from sparx_agency.core.control.camera.pitch_controller import CameraController, CameraControlSettings
-from sparx_agency.core.planning.object_search.perception.cycle import PerceptionCycle
+from sparx_agency.core.planning.object_search.perception.cycle import TargetStairCycle
+from sparx_agency.core.planning.object_search.perception.target_prompts import target_stair_prompts
 from sparx_agency.core.planning.object_search.closing.target_closing import TargetClosing
-from sparx_agency.core.planning.object_search.closing.target_pursuit import TargetPursuit
 
 
-class RPTSearchPolicy:
-    name = "sparx-rpt-llm-host-sweep"
+def __getattr__(name):
+    """Compatibility for callers importing the room policy here; visual runs don't import rooms."""
+    if name == "LegacyRoomSearchPolicy":
+        from sparx_agency.core.planning.object_search.rooms.legacy_policy import LegacyRoomSearchPolicy
+        return LegacyRoomSearchPolicy
+    raise AttributeError(name)
 
-    def __init__(self, detector, llm_client, settings=None, segmenter=None, frame_log=None):
-        self.detector, self.llm_client, self.segmenter = detector, llm_client, segmenter
-        # Optional (2026-11-22): every RGB frame the policy decides on, kept under its capture pose
-        # (``frame_log/``). Begun at each reset and fed before anything else reads the frame; None keeps none.
+
+class _ObservedSearchPolicy:
+    """Shared observed mapping, collision handling, closing and route execution for both comparison arms."""
+
+    def __init__(self, detector, settings=None, segmenter=None, frame_log=None):
+        self.detector, self.segmenter = detector, segmenter
         self.frame_log = frame_log
         self.settings = settings or RPTSettings()
         s = self.settings
@@ -102,20 +106,12 @@ class RPTSearchPolicy:
         # The planner is the settings' own (``RPTSettings.planner_params``: squeeze rather than detour, the
         # medial-axis layer through doorways), so an offline replay of a recorded action builds the same one.
         self.planner_params = s.planner_params()
-        self.loop_settings = LoopSettings(**s.room_search)
-        self.supervisor_params = self.loop_settings.supervisor_params(s.seed)
-        self.door_settings, self.room_label_settings = DoorSettings(), RoomLabelSettings(**s.room_labels)
-        self.route_settings, self.target_settings = RouteSettings(), TargetEvidenceSettings()
+        self.route_settings = RouteSettings()
         self.sweep_settings = SweepSettings()
-        self.fallback_settings = FallbackSettings()
+        self.fallback_settings = FallbackSettings(exits_first=self.uses_room_loop)
         self.escape_settings = EscapeSettings()
-        self.glance_settings = GlanceSettings(geometric_enabled=s.geometric_glances)
+        self.glance_settings = GlanceSettings(geometric_enabled=s.geometric_glances, cue_enabled=self.uses_room_loop)
         self.sight_settings = SightSettings()
-        # The room extents (2026-11-16): where each room's walls are, its size as final or a lower bound, and
-        # how much of it the camera has covered from detection range -- the oracle's mapped= (the observed part
-        # of the room's free floor, since 2026-11-17). Read off the agent's own occupancy map and its partition
-        # alone (core/mapping/topology/room_extent.py).
-        self.extent_params = ExtentParams()
 
     def standing_retry_clearance_m(self):
         """The clearance the closing's second standing-point planner keeps: the setting, or the body radius by default."""
@@ -125,10 +121,8 @@ class RPTSearchPolicy:
     def configuration(self):
         return {"method": self.name, "adaptation": asdict(self.settings),
                 "planner": asdict(self.planner_params), "converter": asdict(self.converter_params),
-                "supervisor": asdict(self.supervisor_params), "doors": asdict(self.door_settings),
-                "room_labels": asdict(self.room_label_settings), "room_segmentation": asdict(DEFAULT_SEGMENTATION),
-                "route_commitment": asdict(self.route_settings), "target_evidence": asdict(self.target_settings),
-                "frontier_sweep": asdict(self.sweep_settings), "room_search_loop": asdict(self.loop_settings),
+                "pipeline_variant": self.variant, "route_commitment": asdict(self.route_settings),
+                "frontier_sweep": asdict(self.sweep_settings),
                 "exploration_fallback": asdict(self.fallback_settings),
                 "escape_probe": asdict(self.escape_settings),
                 "glances": dict(asdict(self.glance_settings),
@@ -150,23 +144,6 @@ class RPTSearchPolicy:
                                       self.sight_settings.detect_range_m, self.sight_settings.object_band_m[0],
                                       self.sight_settings.object_band_m[1])
                               if self.sight_settings.enabled else "none: every unknown cell is an exit"),
-                "room_extents": dict(asdict(self.extent_params),
-                                     rule="observed map only: every room's boundary faces on the agent's own occupancy "
-                                          "grid classified by what lies beyond them (wall, another room of its own "
-                                          "partition, settled unknown, unseen unknown) and grouped into four sides by "
-                                          "outward normal in the storey's wall frame; a side is seen when at most "
-                                          "open_tolerance of its faces open onto unseen space in runs wider than "
-                                          "doorway_max_m; with four seen sides no part of the room lies outside the map "
-                                          "('all sides mapped' -- not a final size: the partition may still join or "
-                                          "re-cut rooms), else the size is a lower bound shown "
-                                          "as 'at least'; coverage is the room's share of the observed cells; recomputed "
-                                          "from the live map and partition on every update, keyed by cell, never by room "
-                                          "id; shown to the node oracle as mapped= -- the observed part of the room's free "
-                                          "floor out of that floor, in m2 and as a share: floor the robot cannot stand on "
-                                          "(furniture, settled pockets) is not counted (2026-11-17); nothing but that map, its "
-                                          "partition, the sight record and the pose enters the reading -- no simulator "
-                                          "geometry, no room annotations, no size priors "
-                                          "(core/mapping/topology/room_extent.py)"),
                 "target_closing": asdict(self.settings.target_closing),
                 "kinematic": dict(asdict(self.settings.kinematic),
                                   rule="every committed route is walked as the action sequence a Hybrid A* over "
@@ -186,142 +163,25 @@ class RPTSearchPolicy:
                                    "simulator geometry (world_model/standing_floor.py)"
                                    % (self.settings.body_radius_m, self.settings.min_clearance_m,
                                       self.standing_retry_clearance_m()),
-                "room_visit": self._room_visit_description(),
-                "room_partition": "watershed of observed free space with seen stair footprints excluded; stairs are never a room; "
-                                  "a detected door's cut is snapped to the nearest choke within %.1f m; furniture is credited to "
-                                  "the nearest room floor; room numbers are unique across the building"
-                                  % DEFAULT_SEGMENTATION.door_snap_reach_m,
-                "openings": (("every exit of the storey (a doorway or gap at the edge of the mapped floor) is an attribute "
-                              "of the room it opens from, never a node with a number of its own (kept on the room's node "
-                              "for the record; not on its prompt line since 2026-11-17, where the frontier count stands "
-                              "for what is left); the room's own frontier walk looks "
-                              "through them, and a finished room with GAPs left to walk is offered again for them "
-                              "(room-level GAPs, 2026-10-21)"
-                              if self.loop_settings.room_level_gaps else
-                              "doorways and gaps at the edge of the mapped floor are nodes beside the rooms "
-                              "(DEPRECATED exits_as_nodes%s), visited by a peek (threshold, face the unknown, one look to each "
-                              "side) priced at %d actions; valued by the oracle (uncertainty floor %s)"
-                              % ("" if self.loop_settings.exploring else ", the %s visit's only way into an exit"
-                                 % self.loop_settings.visit,
-                                 self.loop_settings.openings.service_steps,
-                                 "off" if not self.loop_settings.unexplored_floor else "p=%.2f" % self.loop_settings.unexplored_floor))
-                             + ("; a confirmed landmark of the target's class is a node at p=%.2f without an oracle call, "
-                                "visited by a peek from %.1f m" % (self.loop_settings.openings.landmark_prob,
-                                                                    self.loop_settings.openings.landmark_standoff_m)
-                                if self.loop_settings.openings.landmarks_enabled else "")
-                             if self.loop_settings.openings.enabled else "none: openings are the exploration fallback's alone"),
-                "floor_exit_gate": ("unknown non-stair rooms get at most one peek attempt per episode before a floor change; "
-                                    "initially classified, scanned and previously peeked rooms are exempt"
-                                    if self.settings.doorway_peek.gate_floor_departure else
-                                    "none: a floor change is the building coordinator's to take at any time"),
-                "node_oracle": {"nodes": "every room of the floor in force (finished ones shown with "
-                                         "their status)" + (
-                                    "" if not self.loop_settings.openings.enabled else
-                                    "; each room's exits are the room's attributes, not nodes"
-                                    if self.loop_settings.room_level_gaps else " + its openings"),
-                                "asks": "independent P(target is in the part of the room not seen yet) per node, "
-                                        "from the model's own "
-                                        "knowledge of standard homes and buildings; the system prompt (the version named "
-                                        "under 'prompt') states the task, what each field means, what the search so far "
-                                        "means for a room (the more of it is mapped and searched, the less of it is left "
-                                        "to hold the target; a room never entered has not been searched) and the reply "
-                                        "format "
-                                        "-- no room named for any object, no number or band, no list of "
-                                        "goal categories, no worked example (2026-11-16; "
-                                        "room_priors.py removed 2026-11-15); the user prompt gives the name of the "
-                                        "episode's target, the HOUSE line (room types found, rooms unidentified, exits "
-                                        "unlooked, the frontier state, actions used of the budget) and one line per room "
-                                        "with four things (2026-11-17): its type (the objects seen only while it is "
-                                        "unclassified), the floor mapped out of its free floor (m2 and share), the "
-                                        "frontiers left, the actions spent inside ('never' for a room not entered); no "
-                                        "distance, no neighbours and no word on where the robot stands -- travel is "
-                                        "RPT*'s; the reply keeps home/house/stage and a first|second pass verdict before "
-                                        "the numbers",
-                                # What the code does to the reply before RPT* sees it (search_node_oracle.score), and
-                                # then by exploration state (RoomSearchLoop._scaled_values, the settings above).
-                                "postprocessing": "format: p or a drifted key, a number as text, a percent sign; ids nobody "
-                                                  "listed dropped; scale: percentages, also when written as fractions of "
-                                                  "one, clamped to 0-100, never renormalised; meaning: an omitted node "
-                                                  "1%, a room never entered never 0 (read as 1%, then the loop's floor "
-                                                  "for unvisited rooms), an entered room's 0 stands and keeps it out of "
-                                                  "the order (min_prob); no knowledge of any room or object",
-                                # Which wording the model is asked under: the version's name, the model it was
-                                # tuned on and the digest of its text (``search_node_prompts.py``). The model that
-                                # answers is the LLM client's reasoning route, recorded by whoever builds the client
-                                # (the benchmark factory: ``model`` here, ``llm`` / ``llm_identity`` beside this record).
-                                "prompt": prompt_version(self.loop_settings.oracle_prompt).describe(),
-                                "probability_model": "independent_search_success",
-                                "flat_p": self.loop_settings.flat_p,
-                                "code_floors": {"unexplored_floor": self.loop_settings.unexplored_floor},
-                                "second_pass": self.loop_settings.second_pass,
-                                "route": "LLM_REASONING_MODEL",
-                                "cadence": "loop points and semantic discovery -- a room on or off the offer, a room's type "
-                                           "(discovery.semantic_signature, 2026-11-09); geometry alone "
-                                           "within reconsider_min_actions of the last call waits for the loop point; unchanged "
-                                           "prompts reused"},
-                # No staircase is a node of the loop's order (the stair-node code was deleted on 2026-11-16, until
-                # the multi-storey work): where traversal is allowed, the building coordinator's rule is all there is.
-                "floor_change_decision": "building coordinator only",
-                "reasoning_cadence": "room LLM at loop points and semantic discovery events; geometry every %d action(s)"
-                                     "%s; synchronous frame processing, one full rotation (warm-up scan) before room "
-                                     "selection on every storey first entered"
-                                     % (self.settings.graph_period_steps,
-                                        (", every %d while a committed transit route is walked (rebuilt on the action "
-                                         "the transit ends)" % self.settings.transit_graph_period_steps)
-                                        if (self.settings.transit_graph_period_steps > self.settings.graph_period_steps
-                                            and self.loop_settings.transit_commitment) else ""),
                 "camera_control": asdict(CameraControlSettings()),
                 "perception_fusion": "coherent-depth/floor-qualified-v1" + ("/target-masked" if self.settings.segmentation else ""),
                 "segmentation": ({"enabled": True, "scope": "target boxes at or above detection_confidence",
                                   "depth": "robust_mask_depth over the mask within the box; near-surface component, no coherence gate",
                                   "unmasked_target_box": "not projected (segmentation_unavailable)"}
                                  if self.settings.segmentation else {"enabled": False, "depth": "robust_bbox_depth over the shrunken box"}),
-                "oracle_schema_repairs": 1, "local_exploration": self.settings.local_exploration,
+                "local_exploration": self.settings.local_exploration,
                 "falcon_running": self.settings.local_exploration == "falcon",
                 "falcon_source": dict(FALCON_SOURCE) if self.settings.local_exploration == "falcon" else None,
-                # What perceived for this run, as the services declare it (``interfaces.ground_truth_semantics``):
-                # True under ``--perception ground-truth``. Until 2026-11-16 the constant False.
                 "ground_truth_semantics": ground_truth_semantics(self.detector, self.segmenter),
                 "ground_truth_stairs": False,
                 "stair_source": self.settings.multifloor.stair_source, "training_free": True,
                 "allow_stair_traversal": self.settings.allow_stair_traversal,
                 "floor_plane_bound_m": self.settings.floor_plane_bound_m,
-                "non_metric": False, "clock": "global action ledger; room clock pauses off-floor"}
-
-    def _room_visit_description(self):
-        """The frozen configuration's one-line account of what a room visit is under the loop's ``visit`` mode."""
-        loop = self.loop_settings
-        if not loop.finishing:
-            return "bounded frontier sweep of %d actions" % loop.local_steps
-        finishing = ("finished rooms are shown to the oracle with their status and offered again%s once its pass "
-                     "verdict says the home is covered (a revisit scans from a spot at least %.1f m from the earlier "
-                     "scan points); every unfinished room is valued by the oracle whatever its type (no type "
-                     "exclusion); a room's label is strong on two or more kinds of object and a confident model"
-                     % ("" if loop.second_pass else " (DISABLED: second_pass off)", loop.revisit_standoff_m))
-        if loop.exploring:
-            return ("frontier walk: the room's frontier that reveals the most unknown floor per metre walked, then the "
-                    "next, until none is left (bounded by %d actions); a room the agent stood in with no live frontier "
-                    "is finished (explored), and so is a room a full rotation stood in or saw more than half of, one "
-                    "with no live frontier the camera looked into or walked through, or a doorless fragment under "
-                    "%.1f m2; every rotation is as many turns as the camera's field of view needs to see the circle%s; "
-                    % (loop.explore_visit_steps, loop.fragment_max_m2, self._rotation_note())
-                    + ("every exit of the storey is an attribute of the room it opens from and is walked by that "
-                       "room's visit, and a finished room with GAPs left to walk is offered again for them "
-                       "(room-level GAPs); " if loop.room_level_gaps else
-                       "openings off a room that is itself a node are folded into its walk; ")
-                    + finishing)
-        return ("vantage point + full rotation (as many turns as the camera's field of view needs to see the circle%s); "
-                "a scanned room (or one a scan saw more than half of) is finished for the first pass, and so is a room "
-                "with no live frontier that the camera looked into or walked through, or that is a doorless fragment "
-                "under %.1f m2; " % (self._rotation_note(), loop.fragment_max_m2) + finishing)
-
-    def _rotation_note(self):
-        """`` (N)`` once an episode's camera says how many turns that is; empty before the first reset."""
-        return " (%d)" % self.rotation_turns() if getattr(self, "episode", None) is not None else ""
+                "floor_change_decision": "building coordinator only", "non_metric": False}
 
     def reset(self, episode, target):
         self.episode, self.target = episode, target
-        scope = getattr(self.llm_client, "set_answer_scope", None)
+        scope = getattr(self.model_client, "set_answer_scope", None)
         if scope is not None:
             scope(episode.episode_id)          # an answer store keys by episode (llm_answer_cache)
         self._llm_answers_at_reset = self._llm_answer_totals()
@@ -346,7 +206,7 @@ class RPTSearchPolicy:
         self.standing_retry_planner = WeightedAStarPlanner2D(
             replace(self.planner_params, inflate_floor_m=self.standing_retry_clearance_m()))
         self.route_memory = CommittedRoute(episode.action_spec, self.converter_params, self.route_settings)
-        self.fallback = ExplorationFallback(self, self.fallback_settings)
+        self.fallback = self.fallback_type(self, self.fallback_settings)
         # The fallback's rung before its idle turn: boxed in on the inflated map, one
         # probing step through the thinnest barrier -- the simulator says what the body passes.
         self.escape = EscapeProbe(self, self.escape_settings)
@@ -354,23 +214,8 @@ class RPTSearchPolicy:
         # return, per floor: settled unknown is not frontier, and the poses say
         # which rooms were walked through or looked into.
         self.sight = SightLedger(self, self.sight_settings)
-        # Where every completed look-around stood, on every floor: the one memory
-        # of "this room is finished" that survives the watershed renumbering rooms.
-        # Under the explore visit a room is finished too when the agent has stood in
-        # it and no live frontier is left (its frontiers were walked until none was).
-        self.scans = RoomScanLedger(self, self.loop_settings.scan_seen_fraction,
-                                    fragment_max_m2=self.loop_settings.fragment_max_m2,
-                                    tiny_room_m2=self.loop_settings.tiny_room_m2,
-                                    walkthrough_clearance_m=self.loop_settings.walkthrough_clearance_m,
-                                    seen_range_m=self.loop_settings.scan_seen_range_m)
-        # Sticky ids for the floor's openings and the ones already peeked into,
-        # building-wide like the room numbers: "O3" names one doorway in the recording.
-        self.openings = OpeningRegistry(match_m=self.loop_settings.openings.match_m,
-                                        done_m=self.loop_settings.openings.done_m)
-        self.floors = FloorContextBank(self)
-        self._reset_floor()
+        self._begin_search()
         self._last_plan_s = self._blocked_since = self._last_pose = None
-        self._last_graph_step = -s.graph_period_steps
         self._plan_step = -s.replan_steps
         self._blocked = self._plan_calls = self._duplicates_removed = 0
         self._goal_bumps = {}             # goal cell -> actions of the refused steps toward it (``_bumped_toward``)
@@ -384,7 +229,7 @@ class RPTSearchPolicy:
         self.kinematic = KinematicFollower(self, s.kinematic)
         self.scrape_guard = DoorwayScrapeGuard(self, s.doorway_scrape)
         self.look_down = BottleneckLookDown(self, s.doorway_look_down)
-        self.perception = PerceptionCycle(self)
+        self.perception = self.perception_type(self)
         self.sweep = FrontierSweep(self, self.sweep_settings)
         self.hierarchy = None
         if s.local_exploration == "falcon":
@@ -393,15 +238,12 @@ class RPTSearchPolicy:
         self.building = None
         if s.multifloor.enabled:
             from sparx_agency.core.planning.object_search.multifloor.multifloor_policy import MultiFloorSearch
-            self.building = MultiFloorSearch(self)
+            self.building = MultiFloorSearch(self, confinement_only=not self.uses_room_loop)
         # Spawn-floor confinement: inert when stair traversal is allowed.
         self.floor_guard = SpawnFloorGuard(self)
         # What changed on the planning grid each action, by layer and in or out of the camera's view (map_ledger.py).
         self.map_ledger = MapChangeLedger()
-        self.peek = DoorwayPeek(self)
-        self.closing = TargetClosing(self)
-        # Locked targets the closing gave up for want of a path, walked back to once the map holds one.
-        self.pursuit = TargetPursuit(self)
+        self.closing = TargetClosing(self, target_only=not self.uses_room_loop)
         # Where along the route in force a look to the side (or all round) is worth
         # its actions; performed as a suspended phase when the agent gets there.
         self.glances = GlanceScheduler(self, self.glance_settings)
@@ -413,14 +255,6 @@ class RPTSearchPolicy:
         self._action_owner = "search"
         self._notified_step = self._decision_step = -1
         self._decision_command = None
-        self._semantic_signature = None
-        self._semantic_signature_step = -1
-        self._resume_room = None
-
-    def _reset_floor(self):
-        self.floors.new()
-        self._route = self._goal = self._target_xy = self._target_id = None
-        self.route_memory.clear("floor_reset")
 
     def rotation_turns(self):
         """In-place turns one full look-around takes: what the camera's field of view needs to cover the circle.
@@ -466,7 +300,7 @@ class RPTSearchPolicy:
             self._blocked_since = self._floor_time
         self.route_memory.clear("forward_blocked")
         self._route, self._goal = None, None
-        if self.hierarchy is not None and self._action_owner not in SUSPENDED_PHASES:
+        if self.hierarchy is not None and self._action_owner not in self.suspended_phases:
             self.hierarchy.blocked()
 
     def _bumped_toward(self, observation, goal, kind):
@@ -491,7 +325,7 @@ class RPTSearchPolicy:
         vantage point has its owner's own stall rules.
         """
         s = self.settings
-        if not (kind == "frontier" or (kind or "").startswith("transit/")):
+        if not self._frontier_route(kind):
             return
         key = (round(float(goal[0]) / s.goal_bump_match_m), round(float(goal[1]) / s.goal_bump_match_m))
         step = int(observation.step)
@@ -521,8 +355,9 @@ class RPTSearchPolicy:
                        and self.camera_control.inspection is None)
             self.camera_control.bottleneck_pitch_deg = self.look_down.pitch_request(
                 observation, self.last_world, command.waypoints if walking else None)
-            phase = self.hierarchy.machine.phase if self.hierarchy else str(command.info.get("kind", self.supervisor.state))
-            if self._action_owner in SUSPENDED_PHASES:
+            idle_phase = self.supervisor.state if self.uses_room_loop else "search"
+            phase = self.hierarchy.machine.phase if self.hierarchy else str(command.info.get("kind", idle_phase))
+            if self._action_owner in self.suspended_phases:
                 phase = self._action_owner
             if self.closing.active:
                 phase = "target_" + self.closing.phase.lower()
@@ -549,7 +384,7 @@ class RPTSearchPolicy:
             guarded = self.building.departure.filter_action(observation, action)
             if guarded != action:
                 return guarded
-        if self._action_owner in SUSPENDED_PHASES:
+        if self._action_owner in self.suspended_phases:
             return action  # A* already qualified this route; do not apply the suspended FALCON room mask.
         return self.hierarchy.filter_action(observation, action) if self.hierarchy else action
 
@@ -564,23 +399,26 @@ class RPTSearchPolicy:
             self.closing.note_action(action)
             self.telemetry.emitted(observation, action, self.telemetry.phase)
             return
-        external = self._action_owner in SUSPENDED_PHASES
+        external = self._action_owner in self.suspended_phases
         # The closing's own release turn: decided inside ``closing.plan`` with ``active``
         # already False by now; the search did not take it, so the loop is not charged.
         released = self._action_owner == "target_closing"
         if not self.building or not self.building.committed:
             self._floor_time += self.settings.action_time_s
             if external or released:
-                self.supervisor.pause(self.settings.action_time_s)
+                if self.uses_room_loop:
+                    self.supervisor.pause(self.settings.action_time_s)
                 # The blocked clock pauses with the supervisor's deadlines: a glance or a peek's
                 # look turned in place after a blocked step is not the follower still blocked.
                 # Corozal/000142 (``51eff3fa1637``, 2026-10-13): one blocked step, a ten-turn
                 # glance, and the next four transits were released ``blocked`` one action in.
                 if self._blocked_since is not None:
                     self._blocked_since += self.settings.action_time_s
-            elif self.hierarchy is None:
+            elif self.uses_room_loop and self.hierarchy is None:
                 self.loop.charge()
-        if external and self.warmup_actions < self.warmup_turns:
+        warmup_action = external if self.uses_room_loop else (
+            self._action_owner == "warmup" and action in (DiscreteAction.TURN_LEFT, DiscreteAction.TURN_RIGHT))
+        if warmup_action and self.warmup_actions < self.warmup_turns:
             self.warmup_actions += 1
         if self._action_owner == "doorway_peek":
             self.peek.charge()
@@ -600,29 +438,39 @@ class RPTSearchPolicy:
             self.frame_log.add(observation)
         self.perception.observe(observation)
         self.closing.observe(observation)
+        if not self.uses_room_loop and self.building:
+            self.building.prepare_observation(observation)  # also measure treads while closing or following an RGB bearing
         if self.closing.active:
-            self.pursuit.notify_takeover(observation)
+            if self.uses_room_loop:
+                self.pursuit.notify_takeover(observation)
             self._action_owner = "target_closing"
             # No global decision/fallback try block may catch closing failures.
             # Keep the current-floor collision map fresh without advancing any
             # building/room task or consuming privileged goal data.
             try:
+                revision = self.mapping.floor_revision
                 world = self.mapping.update(observation, arrival_allowed=False)
+                if not self.uses_room_loop and self.building:
+                    self.building.observe(observation)
                 world = self._confine(observation, world)
+                if not self.uses_room_loop and revision != self.mapping.floor_revision:
+                    self._change_floor(observation)
                 self.last_world = world
                 self.sight.observe(observation, world)
+                self._observe_search(observation, world)
                 # The landmark map keeps voting while the takeover walks in (the legacy
                 # target evidence stands down, see ``PerceptionCycle.fuse``): the map
                 # release -- the sofa from four metres that is the bed from two -- needs
                 # the closer frames on the map, and until 2026-10-05 nothing fed them.
-                self._perceive(observation)
+                if self.uses_room_loop:
+                    self._perceive(observation)
                 return self.closing.plan(observation, world)
             except Exception as exc:
                 self.closing.phase = "FAILED"
                 if self.closing.failure is None:
                     self.closing.failure = "%s: %s" % (type(exc).__name__, exc)
                 raise
-        if self.building:
+        if self.building and self.uses_room_loop:
             self.building.prepare_observation(observation)
         started = time.monotonic()
         floor_revision = self.mapping.floor_revision
@@ -641,28 +489,20 @@ class RPTSearchPolicy:
         world = self._confine(observation, world)
         self.telemetry.latencies["mapping"].append((time.monotonic() - started) * 1000)
         if self.mapping.floor_revision != floor_revision:
-            self.peek.cancel(observation, "floor_changed", restore=False)
-            if self.building:
-                fresh = self.mapping.floor_id not in self.floors.contexts and self.mapping.floor_id != self.floors.active
-                self.floors.activate(self.mapping.floor_id)
-                if fresh:
-                    # A storey never stood on: one full rotation at the stair head before any
-                    # room is chosen -- the map gets its first rooms, the ledger its first scan.
-                    self.warmup_actions = 0
-                    self._warmup_pending = True
-            else:
-                self._reset_floor()
+            self._change_floor(observation)
         self.last_world = world
         if self.building:
             self.building.observe(observation)
         if not self.building or not self.building.traversing:
             self.telemetry.observe(observation, world, self.mapping.floor_id)
             self.sight.observe(observation, world)
-        confirmed = self._perceive(observation)
+        confirmed = self._perceive(observation) if self.uses_room_loop else False
+        self._observe_search(observation, world)
         try:
             return self._decide(observation, world, confirmed)
-        except Exception as exc:  # A*, RPT*, the room LLM, or a bug in the decision: keep exploring, loudly
-            self.peek.cancel(observation, "decision_failure")
+        except Exception as exc:  # A*, RPT* or a bug in the decision: keep exploring, loudly
+            if self.uses_room_loop:
+                self.peek.cancel(observation, "decision_failure")
             self._action_owner = "search"
             self.fallback.record_failure(observation, "decision", exc)
             try:
@@ -675,9 +515,10 @@ class RPTSearchPolicy:
     def _decide(self, observation, world, confirmed):
         """The search decision proper; every exception out of here is a recorded fallback, not an idle spin."""
         if self.building and self.building.committed:
-            if not self.building.traversing:
+            if self.uses_room_loop and not self.building.traversing:
                 self._refresh_graph(observation, world)
-            self.peek.cancel(observation, "stairs_priority", restore=False)
+            if self.uses_room_loop:
+                self.peek.cancel(observation, "stairs_priority", restore=False)
             command = self.building.plan(observation, world)
             if command is not None:
                 return command
@@ -685,123 +526,6 @@ class RPTSearchPolicy:
         if inspection is not None:
             return inspection
         return self._search(observation, world, confirmed)
-
-    def _search(self, observation, world, confirmed):
-        s, pose = self.settings, observation.pose
-        # Progress is a forward step's worth of displacement, not the slide a collision
-        # leaves (Leonardo 2026-10-05: wedged for 350 actions, every blocked MOVE_FORWARD
-        # shifted the agent 5-10 cm and that reset the clock the BLOCKED verdict waits on).
-        if self._last_pose is not None and math.dist((pose.x, pose.y), self._last_pose) > 0.6 * self.episode.action_spec.forward_step_m:
-            self._blocked_since = None
-        self._last_pose = (pose.x, pose.y)
-        self.graph.credit_time(world, pose, 0.0 if observation.step == 0 else s.action_time_s, step=observation.step)
-        if self.hierarchy is None and confirmed and self._target_xy is not None and math.dist((pose.x, pose.y), self._target_xy) <= s.stop_distance_m:
-            self.peek.cancel(observation, "target_priority")
-            return NavigationCommand.stop_here(info={"reason": "fresh multi-view-confirmed target", "target_confirmed": True})
-        cost = self._refresh_graph(observation, world)
-        if self._target_xy is not None:
-            self.peek.cancel(observation, "target_priority")
-            self.glances.abort(observation, "target_priority")
-            if self.hierarchy is None and observation.step - self._target_step <= self.target_settings.max_unseen_steps:
-                approach = self._approach(observation, world)
-                if approach is not None:
-                    return approach
-            elif self.hierarchy is not None:
-                return self.hierarchy.plan(observation, world, confirmed)
-        if self.glances.active is not None:
-            if self.building and self.building.traversing:
-                self.glances.abort(observation, "stairs_priority")
-            else:
-                # The look in force: the loop is not ticked and not charged while it
-                # turns; the action it completes on goes to the search below.
-                command = self.glances.continue_look(observation, world)
-                if command is not None:
-                    return command
-        if self._target_xy is None:
-            pursuit = self.pursuit.command(observation, world)
-            if pursuit is not None:
-                return pursuit
-            discovery = self._discover(observation, world, cost)
-            if discovery is not None:
-                return discovery
-        if self.building and self._target_xy is None:
-            command = self.building.plan(observation, world)
-            if command is not None:
-                return self.glances.apply(observation, world, command)
-        if self.hierarchy is not None:
-            command = self.hierarchy.plan(observation, world, confirmed)
-            if self.building and command.stop and self._target_xy is None and not self.hierarchy.errors:
-                return self.building.plan(observation, world, exhausted=True) or command
-            return command
-        return self.glances.apply(observation, world, self.loop.plan(observation, world))
-
-    def _refresh_graph(self, observation, world, force=False):
-        """Refresh geometry even on a stair approach, so new rooms revoke departure.
-
-        The watershed, the registry, the frontier inventory and every
-        per-room fact are rebuilt every ``graph_period_steps`` actions --
-        every action by default -- EXCEPT while a committed transit route is
-        being walked, where they are rebuilt every
-        ``transit_graph_period_steps`` (:meth:`graph_period`): the follower
-        needs the map, not the partition, and the full rebuild was the
-        largest share of every decision's wall time (Corozal/000003,
-        ``c1af8954a378``, 2026-10-22: 1.4 s of a 1.7 s median decision,
-        500 times). The room-search loop forces a rebuild on the action a
-        transit ends (:meth:`~rooms.room_search_loop.RoomSearchLoop._fresh_geometry`),
-        and a loop point reasons over geometry refreshed on its own action
-        regardless. Between rebuilds the frontier inventory is not refreshed
-        either; the committed route does not read it.
-        """
-        pose = observation.pose
-        cost = self.navigation_cost(world)
-        if (force or observation.step - self._last_graph_step >= self.graph_period()
-                or self.doors.revision != self._last_door_revision):
-            started = time.monotonic()
-            self.graph.update(world, self.landmarks.confirmed(), self.target, doors=self.doors.confirmed(),
-                              step=observation.step, reason=False, cost=cost, here_xy=(pose.x, pose.y),
-                              yaw=pose.yaw, ranking=self.sweep.settings.ranking, exclude=self.room_exclusion(world),
-                              preferred_cost=self.preferred_cost(world))
-            self.telemetry.latencies["scene_graph"].append((time.monotonic() - started) * 1000)
-            self._last_graph_step, self._last_door_revision = observation.step, self.doors.revision
-        elif self.graph_period() == self.settings.graph_period_steps:
-            self.graph.refresh_accessibility(world, cost, (pose.x, pose.y), pose.yaw, self.sweep.settings.ranking,
-                                             preferred_cost=self.preferred_cost(world))
-        return cost
-
-    def refresh_graph(self, observation, world, force=False):
-        """The scene graph's geometry for this action (:meth:`_refresh_graph`); ``force`` rebuilds it whatever the cadence."""
-        return self._refresh_graph(observation, world, force=force)
-
-    def graph_period(self):
-        """Actions between two rebuilds of the scene graph's geometry, as things stand this action.
-
-        ``transit_graph_period_steps`` while the room-search loop walks a
-        committed transit route under its commitment rule (the supervisor in
-        TRANSIT, the route memory holding a ``transit/`` route), else
-        ``graph_period_steps``.
-        """
-        s = self.settings
-        if s.transit_graph_period_steps <= s.graph_period_steps:
-            return s.graph_period_steps
-        supervisor, loop, route = getattr(self, "supervisor", None), getattr(self, "loop", None), self.route_memory
-        if (supervisor is not None and supervisor.state == "transit" and loop is not None
-                and getattr(loop.settings, "transit_commitment", False)
-                and route.path is not None and str(route.kind or "").startswith("transit/")):
-            return s.transit_graph_period_steps
-        return s.graph_period_steps
-
-    def room_exclusion(self, world):
-        """Cells that are never room floor: the footprint of every seen staircase near this storey's level.
-
-        A staircase is a connector between storeys, not a room. Left in the
-        free mask, the watershed carved a "room" on the landing that the
-        search valued, peeked and waited on. None when the building knows
-        no stairs here.
-        """
-        if self.building is None:
-            return None
-        mask = stair_peek_mask(self, world)
-        return mask if mask.any() else None
 
     def navigation_cost(self, world):
         """The common clearance-qualified map used by counts, entries and routes (passable at the planner's floor standoff).
@@ -828,9 +552,6 @@ class RPTSearchPolicy:
         will take, not the squeeze it would refuse (cached by the planner).
         """
         return self.planner.cost_for(world)[0]
-
-    def _discover(self, obs, world, cost):
-        return discover(self, obs, world, cost)
 
     def _confine(self, observation, world):
         """The world every decision plans on: seen stairs and observed drops impassable while traversal is forbidden, the trail free.
@@ -908,7 +629,7 @@ class RPTSearchPolicy:
         # refusals flushed the hundred-goal memory and hid every frontier within 0.4 m of the ring.
         # ``retire=False`` when this refusal is not the last word on the goal (the transit asks the
         # squeeze planner next, ``RoomSearchLoop._navigate_transit``).
-        retiring = retire and (kind == "frontier" or kind.startswith("transit/"))
+        retiring = retire and self._frontier_route(kind)
         if not self.floor_guard.goal_allowed(observation, world, goal, kind):
             if retiring:
                 self._visited_frontiers.append(tuple(goal))
@@ -943,31 +664,9 @@ class RPTSearchPolicy:
         command = NavigationCommand.follow(self._route, final_yaw=final_yaw, info=info)
         return self.kinematic.command(observation, world, planner, command)
 
-    def _perceive(self, observation):
-        return self.perception.fuse(observation)
-
-    def _approach(self, observation, world):
-        p = observation.pose
-        dx, dy = self._target_xy[0] - p.x, self._target_xy[1] - p.y
-        distance = math.hypot(dx, dy)
-        at_path_end = self.route_memory.kind == "target" and self.route_memory.arrived(observation)
-        if distance <= self.settings.stop_distance_m or at_path_end or self.target_evidence.verification_started(self._target_id):
-            self.route_memory.clear("target_route_arrived")
-            self._route = self._goal = None
-            yaw = self.target_evidence.verification_yaw(self._target_id, p.yaw, self.episode.action_spec.turn_angle_rad)
-            if yaw is not None:
-                return NavigationCommand.hold(final_yaw=yaw, info={"reason": "bounded target verification"})
-            self.target_evidence.reject(self._target_id, observation.step)
-            self._target_xy = self._target_id = None
-            return None
-        margin = self.converter_params.goal_tolerance_m + world.resolution + self.planner_params.goal_snap_radius_m
-        standoff = max(self.settings.body_radius_m, self.settings.stop_distance_m - margin)
-        scale = (distance - standoff) / distance
-        command = self._navigate(observation, world, (p.x + dx * scale, p.y + dy * scale), "target", final_yaw=math.atan2(dy, dx))
-        if command is None and self.route_memory.reason == "no_progress":
-            self.target_evidence.reject(self._target_id, observation.step)
-            self._target_xy = self._target_id = None
-        return command
+    @staticmethod
+    def _frontier_route(kind):
+        return kind == "frontier" or (kind or "").startswith(("frontier/", "transit/"))
 
     def _plan_to(self, observation, world, goal, planner=None, exact_goal=False):
         p = observation.pose
@@ -985,7 +684,7 @@ class RPTSearchPolicy:
         return result.path
 
     def _llm_answer_totals(self):
-        stats = getattr(self.llm_client, "answer_stats", None)
+        stats = getattr(self.model_client, "answer_stats", None)
         return stats() if stats is not None else None
 
     def _llm_answer_counts(self):
@@ -996,39 +695,122 @@ class RPTSearchPolicy:
         then = getattr(self, "_llm_answers_at_reset", None) or {}
         return {"llm_answers": {k: v - then.get(k, 0) for k, v in now.items()}}
 
+
+class RPTSearchPolicy(_ObservedSearchPolicy):
+    """ObjectNav with independent visual frontier probabilities, RPT* ordering and observed-floor A*."""
+
+    name = "sparx-rpt-vlm-frontiers"
+    variant = "rpt"
+    uses_room_loop = False
+    suspended_phases = ("warmup", "glance")
+    fallback_type = GeometricFallback
+    perception_type = TargetStairCycle
+
+    def __init__(self, detector, vlm_client, settings=None, segmenter=None, frame_log=None):
+        settings = settings or RPTSettings()
+        settings.validate_frontier_method()
+        settings = replace(settings, target_closing=replace(settings.target_closing, support_surface_resilience=False),
+                           doorway_scrape=replace(settings.doorway_scrape, doorways_only=False))
+        if frame_log is None:
+            frame_log = EpisodeFrameLog(MemoryFrameStore())
+        super().__init__(detector, settings, segmenter=segmenter, frame_log=frame_log)
+        self.vlm_client = vlm_client
+
+    @property
+    def model_client(self):
+        return self.vlm_client
+
+    def _begin_search(self):
+        configure = getattr(self.detector, "set_episode_prompts", None)
+        if configure is not None:
+            configure(target_stair_prompts(self.target))
+        self.frontiers = FrontierSearch(self)
+        self._retired_by_floor = {}
+        self._change_floor(None)
+
+    def _plan(self, observation):
+        # The Habitat adapter uses +inf for a clipped far pixel. Don't let another
+        # adapter turn saturation into an occupied wall or a measured target.
+        far = np.isfinite(observation.depth_m) & (observation.depth_m >= observation.camera.max_depth_m)
+        if np.any(far):
+            depth = observation.depth_m.copy()
+            depth[far] = np.inf
+            observation = replace(observation, depth_m=depth)
+        return super()._plan(observation)
+
+    def _change_floor(self, observation):
+        floor = self.mapping.floor_id
+        if floor not in self._retired_by_floor:
+            self.warmup_actions = 0
+        self._visited_frontiers = self._retired_by_floor.setdefault(floor, [])
+        self._goal_bumps = {}
+        self._floor_time = 0.0
+        self._route = self._goal = self._last_pose = self._blocked_since = None
+        self.route_memory.clear("floor_reset")
+
+    def _observe_search(self, observation, world):
+        # Observation never owns motion: in particular an unavailable score must not preempt closing or warm-up.
+        try:
+            self.frontiers.refresh(observation, world, on_floor=not self.mapping.atlas.in_transition)
+        except ObjNavInternalError:
+            raise
+        except (ValueError, ArithmeticError, RuntimeError) as exc:
+            self.frontiers.nodes = {}
+            self.frontiers.blocked_cells.clear()
+            self.frontiers.inventory = None
+            self.fallback.record_failure(observation, "frontier_observation", exc)
+
+    def _search(self, observation, world, confirmed):
+        command = rotation_command(self, observation)
+        if command is not None:
+            return command
+        if self.glances.active is not None:
+            command = self.glances.continue_look(observation, world)
+            if command is not None:
+                return command
+        if self.building is not None and not self.building.committed:
+            inspection = self.building.plan(observation, world)
+            if inspection is not None:
+                return inspection
+        return self.glances.apply(observation, world, self._explore(observation, world))
+
+    def _explore(self, observation, world):
+        command = self.frontiers.plan(observation, world)
+        if command is not None:
+            return command
+        return self.fallback.plan(observation, world, reason="no reachable unvisited VLM-scored frontier")
+
+    def filter_action(self, observation, action):
+        # Direct closing/inspection steps do not always have an A* path. The measured
+        # stair/drop exclusion applies to them too. A trail retreat returns to the storey.
+        retreat = self.building and self.building.retreating and not self.closing.active
+        if action == DiscreteAction.MOVE_FORWARD and not retreat:
+            world, guard = self.last_world, self.floor_guard
+            pose, step = observation.pose, self.episode.action_spec.forward_step_m
+            start = world.world_to_grid(pose.x, pose.y)
+            end = world.world_to_grid(pose.x + step * math.cos(pose.yaw), pose.y + step * math.sin(pose.yaw))
+            if (guard.off_plane or self.mapping.atlas.in_transition or not world.in_bounds(*end) or
+                    (guard.mask is not None and not line_of_sight_clear(guard.mask, *start, *end))):
+                return DiscreteAction.TURN_LEFT
+        return action
+
+    def configuration(self):
+        return {**super().configuration(), "frame_log": self.frame_log.describe(),
+                "detector_scope": "episode target aliases + stairs", "floor_change_decision": "none: avoidance only",
+                "perception_fusion": "target-only depth in TargetClosing; RGB-only bearing until depth is valid",
+                "frontier_search": {"nodes": asdict(NodeSettings()), "views": asdict(ViewSettings()),
+                                    "prompt": PROMPT_VERSION, "valuation": "one independent probability per node"}}
+
     def episode_info(self):
-        return {"method": self.name, "rooms": len(self.graph.registry.rooms), "landmarks": len(self.landmarks),
+        return {"method": self.name, "pipeline_variant": self.variant, "frontier_search": self.frontiers.diagnostics(),
+                "detector_prompts": list(target_stair_prompts(self.target)),
+                "solver_records": self._solver_records, "plan_calls": self._plan_calls, **self._llm_answer_counts(),
                 "warmup": {"actions": self.warmup_actions, "budget": self.warmup_turns, "bound": self.settings.warmup_steps},
-                "doorway_peek": self.peek.diagnostics(),
-                "llm_queries": self.graph.queries, "oracle_reuses": self.graph.oracle_reuses,
-                **self._llm_answer_counts(),
-                "supervisor": dict(self.supervisor.stats), "solver_records": self._solver_records,
-                "blocked": self._blocked, "goals_retired_by_bumps": self._goals_retired_by_bumps,
-                "doors": self.doors.diagnostics(), "max_rooms": self.graph.max_rooms,
-                "room_label_queries": self.graph.label_tracker.queries, "room_label_history": list(self.graph.label_tracker.history),
-                "room_labels_held": self.graph.label_tracker.held,
-                "room_labels_dining_downgraded": self.graph.label_tracker.dining_downgrades,
-                "room_labels_shape_ruled": self.graph.label_tracker.shape_ruled,
-                "last_reasoning": self.graph.last_reasoning, "route_commitment": dict(self.route_memory.stats),
-                "plan_calls": self._plan_calls, "duplicates_removed": self._duplicates_removed,
-                "target_evidence": self.target_evidence.diagnostics(), "floor_revisions": self.mapping.floor_revision,
-                "target_closing": self.closing.diagnostics(),
-                "target_pursuit": self.pursuit.diagnostics(),
-                "perception": self.perception.diagnostics(), "camera": dict(self.camera_control.last), "floor_maps": self.mapping.integrity(),
+                "target_closing": self.closing.diagnostics(), "perception": self.perception.diagnostics(),
+                "exploration_fallback": self.fallback.diagnostics(), "exploration_metrics": self.telemetry.report(),
                 "building": self.building.diagnostics() if self.building else None,
-                "spawn_floor_guard": self.floor_guard.diagnostics(),
-                "map_changes": self.map_ledger.diagnostics(),
-                "frontier_sweep": self.sweep.diagnostics(),
-                "room_search_loop": self.loop.diagnostics(),
-                "room_scans": self.scans.diagnostics(),
-                "sight": self.sight.diagnostics(),
-                "openings": self.openings.diagnostics(),
-                "glances": self.glances.diagnostics(),
-                "exploration_fallback": self.fallback.diagnostics(),
-                "escape_probe": self.escape.diagnostics(),
-                "kinematic": self.kinematic.diagnostics(),
-                "doorway_scrape": self.scrape_guard.diagnostics(),
-                "doorway_look_down": self.look_down.diagnostics(),
-                "exploration_metrics": self.telemetry.report(), "hierarchy": self.hierarchy.diagnostics() if self.hierarchy else None,
-                "oracle_repair_attempts": self.graph.oracle.repair_attempts,
-                "oracle_repair_successes": self.graph.oracle.repair_successes}
+                "spawn_floor_guard": self.floor_guard.diagnostics(), "floor_maps": self.mapping.integrity(),
+                "map_changes": self.map_ledger.diagnostics(), "route_commitment": dict(self.route_memory.stats),
+                "kinematic": self.kinematic.diagnostics(), "doorway_scrape": self.scrape_guard.diagnostics(),
+                "doorway_look_down": self.look_down.diagnostics(), "glances": self.glances.diagnostics(),
+                "blocked": self._blocked, "goals_retired_by_bumps": self._goals_retired_by_bumps}

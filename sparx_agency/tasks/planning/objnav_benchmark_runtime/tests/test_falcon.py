@@ -20,7 +20,7 @@ from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_labe
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
 from sparx_agency.core.planning.object_search.falcon.regions import ObservedRegions
-from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy, RPTSettings
+from sparx_agency.core.planning.object_search.policy import LegacyRoomSearchPolicy, RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation, setup_policy
 
 
@@ -194,7 +194,7 @@ def test_scope_and_visit_history_survive_room_splits_and_renumbering():
 
 def test_policy_selection_provenance_and_no_silent_backend_fallback():
     p, episode = setup_policy("bed")
-    p = RPTSearchPolicy(p.detector, p.llm_client, replace(p.settings, local_exploration="falcon"))
+    p = LegacyRoomSearchPolicy(p.detector, p.llm_client, replace(p.settings, local_exploration="falcon"))
     config = p.configuration()
     assert config["falcon_running"] and config["falcon_source"] == SOURCE
     assert config["falcon_source"]["fallback_explorer"] is None

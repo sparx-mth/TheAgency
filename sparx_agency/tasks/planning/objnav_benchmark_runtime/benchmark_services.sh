@@ -55,33 +55,20 @@ objnav_services_defaults() {
   SEGMENTER_DEVICE="${SEGMENTER_DEVICE:-cpu}"        # cpu: ~0.3 s per frame with target boxes (MobileSAM, 4 threads)
   SEGMENTER_THREADS="${SEGMENTER_THREADS:-4}"
   # Ollama: "docker" starts/stops the named container, "native" runs `ollama serve`, "external" only checks it.
-  OLLAMA_MODE="${OLLAMA_MODE:-docker}"
+  OLLAMA_MODE="${OLLAMA_MODE:-native}"
   OLLAMA_CONTAINER="${OLLAMA_CONTAINER:-ollama-scene-graph}"
   OLLAMA_MODELS_DIR="${OLLAMA_MODELS_DIR:-$MODELS/ollama}"
-  # Request slots of the native server: one serialises every LLM call; a parallel run (gibson --parallel N, hm3d
-  # --jobs N) raises it so the processes' node-oracle calls are batched on the card instead of queued. Each slot
-  # beyond the first costs its own KV cache (gpu_plan.py LLM_SLOT_FACTOR), so the plan reads it too.
-  OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
-  # The context the native server loads a model with when a request names none. The node oracle asks for its own
-  # (LLM_REASONING_NUM_CTX); the room-label calls do not, and without this they load qwen2.5:3b-instruct at the
-  # model's 32k -- 2.3 GB of KV cache per slot for prompts of a few hundred tokens (measured 2026-10-22).
-  OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}"
+  # One warm, quantized vision model shared by the workers, not a model or a KV window per renderer.
+  export OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
   # Habitat renderers on the card at once: one per benchmark process (--parallel N / --jobs N set it; the GPU plan reads it).
   HABITAT_RENDERERS="${HABITAT_RENDERERS:-1}"
   # A recorded gpu_plan.json to start the services from instead of planning again (a resume; see the header).
   GPU_PLAN_REPLAY="${GPU_PLAN_REPLAY:-}"
   export LLM_BACKEND="${LLM_BACKEND:-ollama}"
   export LLM_BASE_URL="${LLM_BASE_URL:-http://127.0.0.1:11434}"
-  export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b-instruct}"
-  # The node oracle's model. The 3B since 2026-11-16: it is the model the development laptop can hold, and the
-  # one the default oracle prompt (facts-qwen2.5-3b-v1) is tuned on. A machine with the memory for a larger model
-  # sets this -- and a prompt version tuned on that model (QUICKSTART.md section 2.4); the runs published before
-  # that date used qwen2.5:14b-instruct.
-  export LLM_REASONING_MODEL="${LLM_REASONING_MODEL:-qwen2.5:3b-instruct}"
   export LLM_TIMEOUT_S="${LLM_TIMEOUT_S:-120}" LLM_SEED="${LLM_SEED:-17}" LLM_TEMPERATURE="${LLM_TEMPERATURE:-0}"
-  export LLM_KEEP_ALIVE="${LLM_KEEP_ALIVE:-30m}" LLM_MAX_TOKENS="${LLM_MAX_TOKENS:-768}"
-  export LLM_REASONING_TIMEOUT_S="${LLM_REASONING_TIMEOUT_S:-900}" LLM_REASONING_MAX_TOKENS="${LLM_REASONING_MAX_TOKENS:-1536}"
-  export LLM_REASONING_NUM_CTX="${LLM_REASONING_NUM_CTX:-8192}"
+  export LLM_KEEP_ALIVE="${LLM_KEEP_ALIVE:-30m}"
+  export GPU_RESERVE_MIB="${GPU_RESERVE_MIB:-2048}"
   export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" HABITAT_SIM_LOG="${HABITAT_SIM_LOG:-quiet}" MAGNUM_LOG="${MAGNUM_LOG:-quiet}"
   SEED="${SEED:-17}"
   GPU_DEVICE="${GPU_DEVICE:-0}"
@@ -97,7 +84,25 @@ objnav_services_defaults() {
   RUNS_ROOT="${RUNS_ROOT:-$REPO/runs}"
 }
 
+objnav_model_defaults() {
+  # --agent has been parsed. Do not leak a visual model, JSON cap or KV dtype into the room comparison.
+  export OBJNAV_AGENT_VARIANT="$AGENT"
+  if [[ "$AGENT" == rpt_room_llm ]]; then
+    export LLM_MODEL="${LLM_MODEL:-qwen2.5:3b-instruct}" LLM_REASONING_MODEL="${LLM_REASONING_MODEL:-qwen2.5:3b-instruct}"
+    export LLM_MAX_TOKENS="${LLM_MAX_TOKENS:-768}" LLM_REASONING_MAX_TOKENS="${LLM_REASONING_MAX_TOKENS:-1536}"
+    export LLM_REASONING_TIMEOUT_S="${LLM_REASONING_TIMEOUT_S:-900}" LLM_REASONING_NUM_CTX="${LLM_REASONING_NUM_CTX:-8192}"
+    export OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-8192}" OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-2}"
+  else
+    export LLM_MODEL="${LLM_MODEL:-qwen2.5vl:7b}" LLM_MAX_TOKENS="${LLM_MAX_TOKENS:-32}"
+    export OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-1}"
+    export OLLAMA_FLASH_ATTENTION="${OLLAMA_FLASH_ATTENTION:-1}" OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-q8_0}"
+    export OLLAMA_CONTEXT_LENGTH="${OLLAMA_CONTEXT_LENGTH:-${LLM_NUM_CTX:-4096}}"
+    export LLM_NUM_CTX="${LLM_NUM_CTX:-$OLLAMA_CONTEXT_LENGTH}" LLM_NUM_BATCH="${LLM_NUM_BATCH:-256}"
+  fi
+}
+
 objnav_services_up() {
+  objnav_model_defaults
   [[ -n "${RUN_MODULE:-}" ]] || die "benchmark_services.sh: the launcher must set RUN_MODULE before objnav_services_up"
   [[ -n "${SERVICE_DIR:-}" && -n "${LOG:-}" ]] || die "benchmark_services.sh: the launcher must set SERVICE_DIR and LOG before objnav_services_up"
 
@@ -114,17 +119,29 @@ objnav_services_up() {
       [[ "$SEGMENTATION" == 0 ]] || die "PERCEPTION=ground-truth reads its masks from the simulator; SEGMENTATION=1 contradicts it" ;;
     *) die "PERCEPTION must be service or ground-truth" ;;
   esac
-  # An LLM already answering at LLM_BASE_URL is resident: its VRAM is already in nvidia-smi's "used", so the plan
-  # must neither budget it again nor re-place it. Left to itself the plan would read the full card as "no room for
-  # the LLM" and export LLM_NUM_GPU=0 -- and every child would then ask the SHARED server for num_gpu=0, reloading
-  # both models on the CPU for every run using it, a live campaign included (found 2026-10-26 planning the
-  # ground-truth run beside the running v1 sweep).
-  LLM_RESIDENT=0
-  if [[ "$AGENT" != falcon-yolo ]] && curl -fsS --max-time 5 "$LLM_BASE_URL/api/tags" > /dev/null 2>&1; then
-    LLM_RESIDENT=1
-    export GPU_PLAN_LLM="${GPU_PLAN_LLM:-gpu}" LLM_VRAM_MIB="${LLM_VRAM_MIB:-0}"
+  # /api/tags says a server exists, not that the requested vision model is in VRAM.
+  # Budget a cold model even on a live server, but never change an existing server's layer placement.
+  LLM_SERVER_UP=0
+  if [[ "$AGENT" != falcon-yolo ]]; then
+    if [[ "$LLM_BACKEND" == openai || "$LLM_BACKEND" == openai-compat ]]; then
+      # Externally managed (e.g. local vLLM): already reserved, or not on this card. Factory probes /models + images.
+      [[ "${LLM_SERVERS:-1}" == 1 ]] || die "--llm-servers starts native Ollama replicas, not OpenAI-compatible servers"
+      LLM_SERVER_UP=1
+      export GPU_PLAN_LLM="${GPU_PLAN_LLM:-gpu}" LLM_VRAM_MIB="${LLM_VRAM_MIB:-0}"
+    elif [[ "$LLM_BACKEND" != ollama ]]; then
+      die "unknown LLM_BACKEND: $LLM_BACKEND"
+    elif curl -fsS --max-time 5 "$LLM_BASE_URL/api/tags" > /dev/null 2>&1; then
+      LLM_SERVER_UP=1
+      if [[ "${LLM_SERVERS:-1}" == 1 && ( "$AGENT" != rpt_room_llm || "$LLM_MODEL" == "${LLM_REASONING_MODEL:-}" ) ]] && curl -fsS --max-time 5 "$LLM_BASE_URL/api/ps" | "$HAB_PY" -c '
+import json, sys
+sys.exit(not any(m.get("name") == sys.argv[1] and m.get("size_vram", 0) > 0
+                 for m in json.load(sys.stdin)["models"]))' "$LLM_MODEL"; then
+        export GPU_PLAN_LLM="${GPU_PLAN_LLM:-gpu}" LLM_VRAM_MIB="${LLM_VRAM_MIB:-0}"
+      fi
+    fi
   fi
   if [[ "$GPU_PLAN" == "auto" ]]; then
+    export OBJNAV_VLM_SERVERS="${LLM_SERVERS:-1}"
     export OLLAMA_MODELS_DIR OLLAMA_NUM_PARALLEL HABITAT_RENDERERS
     if [[ -n "$GPU_PLAN_REPLAY" ]]; then
       [[ -f "$GPU_PLAN_REPLAY" ]] || die "GPU_PLAN_REPLAY names no recorded plan at $GPU_PLAN_REPLAY"
@@ -140,9 +157,9 @@ objnav_services_up() {
     OPERATOR_SHARED_GPU="$ALLOW_SHARED_GPU"
     eval "$PLAN_ENV"                      # sets ALLOW_SHARED_GPU=1 when more than one process (or a desktop) holds the card
     [[ "$OPERATOR_SHARED_GPU" == 1 ]] && ALLOW_SHARED_GPU=1
-    if [[ "$LLM_RESIDENT" == 1 ]]; then
-      export LLM_NUM_GPU=""                # the resident server keeps the placement it was started with
-      say "LLM already resident at $LLM_BASE_URL: budgeted as placed (its VRAM is in 'used'); requests leave its device alone" | tee -a "$LOG"
+    if [[ "$LLM_SERVER_UP" == 1 ]]; then
+      export LLM_NUM_GPU=""
+      say "VLM server already running at $LLM_BASE_URL: requests leave its device alone" | tee -a "$LOG"
     fi
     export OBJNAV_GPU_PLAN_JSON="$SERVICE_DIR/gpu_plan.json"
     say "GPU plan: LLM=$OBJNAV_LLM_DEVICE  YOLO=$OBJNAV_YOLO_DEVICE  Habitat=$OBJNAV_HABITAT_DEVICE  (gpu_plan.json; GPU_PLAN=off for CPU services)" | tee -a "$LOG"
@@ -187,8 +204,10 @@ PY
 
   if [[ "$AGENT" == falcon-yolo ]]; then
     say "LLM: none (--agent falcon-yolo: goal-free FALCON + YOLO + the same closing; Ollama is neither started nor checked)" | tee -a "$LOG"
+  elif [[ "$LLM_BACKEND" != ollama ]]; then
+    say "Frontier VLM: external $LLM_BACKEND server, model $LLM_MODEL (left running)" | tee -a "$LOG"
   else
-  say "LLM: $OLLAMA_MODE at $LLM_BASE_URL ($LLM_MODEL for room labels, $LLM_REASONING_MODEL for the node oracle)" | tee -a "$LOG"
+  say "$AGENT: $OLLAMA_MODE at $LLM_BASE_URL ($LLM_MODEL, context $OLLAMA_CONTEXT_LENGTH)" | tee -a "$LOG"
   if ! curl -fsS --max-time 5 "$LLM_BASE_URL/api/tags" > /dev/null 2>&1; then
     case "$OLLAMA_MODE" in
       docker) docker start "$OLLAMA_CONTAINER" > /dev/null || die "docker start $OLLAMA_CONTAINER failed"; STARTED_OLLAMA=1 ;;
@@ -198,7 +217,7 @@ PY
               else say "starting ollama on GPU $OLLAMA_CUDA_VISIBLE_DEVICES ($OLLAMA_NUM_PARALLEL request slot(s), default context $OLLAMA_CONTEXT_LENGTH)" | tee -a "$LOG"; fi
               CUDA_VISIBLE_DEVICES="$OLLAMA_CUDA_VISIBLE_DEVICES" OLLAMA_HOST="${LLM_BASE_URL#http://}" OLLAMA_MODELS="$OLLAMA_MODELS_DIR" \
                 OLLAMA_NUM_PARALLEL="$OLLAMA_NUM_PARALLEL" OLLAMA_CONTEXT_LENGTH="$OLLAMA_CONTEXT_LENGTH" \
-                OLLAMA_MAX_LOADED_MODELS=2 OLLAMA_KEEP_ALIVE=30m ollama serve > "$SERVICE_DIR/ollama.log" 2>&1 &
+                OLLAMA_KEEP_ALIVE="$LLM_KEEP_ALIVE" ollama serve > "$SERVICE_DIR/ollama.log" 2>&1 &
               OLLAMA_PID=$!; STARTED_OLLAMA=1 ;;
       external) die "no LLM service answers at $LLM_BASE_URL (OLLAMA_MODE=external: start it yourself)" ;;
       *) die "OLLAMA_MODE must be docker, native or external" ;;
@@ -210,20 +229,21 @@ PY
   if [[ "$OLLAMA_MODE" == docker && "$STARTED_OLLAMA" == 1 && "$OBJNAV_LLM_DEVICE" != cpu ]]; then
     say "NOTE: the $OLLAMA_CONTAINER container's GPU access was fixed when it was created; the plan's LLM device is advisory in docker mode" | tee -a "$LOG"
   fi
-  for model in "$LLM_MODEL" "$LLM_REASONING_MODEL"; do
-    if ! objnav_ollama_has "$model"; then
-      say "pulling $model (first time only; several GB)" | tee -a "$LOG"
-      case "$OLLAMA_MODE" in
-        docker) docker exec "$OLLAMA_CONTAINER" ollama pull "$model" ;;
-        native) OLLAMA_HOST="${LLM_BASE_URL#http://}" ollama pull "$model" ;;
-        *) die "$model is not provisioned on $LLM_BASE_URL" ;;
-      esac
-    fi
+  local models=("$LLM_MODEL") model
+  if [[ "$AGENT" == rpt_room_llm && "$LLM_MODEL" != "$LLM_REASONING_MODEL" ]]; then models+=("$LLM_REASONING_MODEL"); fi
+  for model in "${models[@]}"; do
+    objnav_ollama_has "$model" && continue
+    say "pulling $model (first time only; several GB)" | tee -a "$LOG"
+    case "$OLLAMA_MODE" in
+      docker) docker exec "$OLLAMA_CONTAINER" ollama pull "$model" ;;
+      native) OLLAMA_HOST="${LLM_BASE_URL#http://}" ollama pull "$model" ;;
+      *) die "$model is not provisioned on $LLM_BASE_URL" ;;
+    esac
   done
   fi
 
   DETECTOR_URL="http://$DETECTOR_HOST:$DETECTOR_PORT"
-  VOCAB="$(OMP_NUM_THREADS=2 "$HAB_PY" -m "$RUN_MODULE" --print-vocabulary 2>/dev/null | tail -1)"
+  VOCAB="$(OMP_NUM_THREADS=2 "$HAB_PY" -m "$RUN_MODULE" --agent "$AGENT" --print-vocabulary 2>/dev/null | tail -1)"
   [[ -n "$VOCAB" ]] || die "$RUN_MODULE --print-vocabulary printed nothing (does $HAB_PY import the repo?)"
   printf '%s\n' "$VOCAB" > "$SERVICE_DIR/vocabulary.txt"
   PERCEPTION_FLAGS=()

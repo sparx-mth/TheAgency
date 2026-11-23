@@ -21,7 +21,7 @@ from sparx_agency.core.planning.objnav.labels.datasets.hm3d import hm3d_label_ma
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import (
     PERCEPTION_GROUND_TRUTH, add_detector_options)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import (  # noqa: F401  (StopDiagnostic re-exported for the sibling CLIs)
-    AGENT_CHOICES, AGENT_HELP, StopDiagnostic, build_policy)
+    AGENT_CHOICES, AGENT_HELP, StopDiagnostic, build_policy, detector_vocabulary)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (
     episodes_of_category, explicit_episodes, gpu_plan_record, select_episodes)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.entrypoint import (  # noqa: F401  (re-exported: the sibling CLIs and the tests read them here)
@@ -51,9 +51,7 @@ def parser():
     p.add_argument("--policy-config", type=Path,
                    help="JSON object of RPTSettings overrides")
     p.add_argument("--explorer", choices=("frontier", "falcon"), default=None,
-                   help="Local exploration inside a room: the observed-map frontier "
-                        "sweep (default) or the planar FALCON adaptation. Must agree "
-                        "with local_exploration in --policy-config when both are given")
+                   help="rpt uses frontier; rpt_room_llm supports frontier or falcon; falcon-yolo uses falcon")
     # The detector and the (off by default) segmenter: the same switches as gibson.run,
     # so a campaign forwards one set of perception flags to either benchmark.
     add_detector_options(p, url_default="http://127.0.0.1:18092")
@@ -245,7 +243,8 @@ def prepare(args):
                 issues.extend("Ground-truth perception: %s" % issue for issue in annotation_issues)
                 if not annotation_issues:
                     from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.source import GroundTruthSource
-                    ground_truth = GroundTruthSource(hm3d_label_mapper())
+                    mapper = hm3d_label_mapper()
+                    ground_truth = GroundTruthSource(mapper, vocabulary=detector_vocabulary(args.agent, mapper))
             if not oracle or ground_truth is not None:
                 # habitat-sim matches gpu_device_id against the EGL devices' CUDA ids; -1 skips the match
                 # and takes EGL device 0, which the software-render launch makes Mesa's llvmpipe.

@@ -7,8 +7,17 @@ adapters, the HTTP service clients, the recording and the dashboards -- and the
 regression rig that exercises the method on the benchmark's camera. See "Where
 the code is" below for the map and the recipe for a new dataset.
 
-Observed RGB-D mapping → semantic room graphs → room LLM → RPT* room order →
-local exploration and A*/WA* paths → existing discrete actions. Both explorers
+**Live `--agent rpt`:** observed RGB-D mapping → reachable frontiers → VLM
+probabilities from boxed camera views → RPT* frontier order → A*/WA* paths.
+No room LLM, watershed, object/door landmarks or support-surface STOPs. YOLO
+predicts only the episode's target aliases plus stairs; GT measures only those
+instances. See the [24 GiB serving profile](QUICKSTART.md#21-frontier-vlm-on-a-24-gib-rtx-4090).
+**`--agent rpt_room_llm`** restores the room-loop method described below:
+full detector vocabulary, object landmarks and watershed, text room labels
+and probabilities, RPT* room order and local exploration. Use identical episode
+IDs, seed and perception mode, **separate output directories** and each variant's
+own `--print-vocabulary`. `method.pipeline_variant` identifies the arm in the
+frozen run and `agent_info.policy.pipeline_variant` in full and lean rows. Both RPT and the FALCON baseline
 retain persistent floor contexts; stairs are what the robot's own RGB-D
 measures (`RPTSettings.multifloor.stair_source: "observed"`, the default since
 2026-10-21 and the only source since 2026-11-15 -- a reachable run of treads
@@ -2816,11 +2825,10 @@ What follows from that:
 - **N actions, N frames.** Steps 0 to N-1; the frame the last action returns
   is shown to no policy and is not logged (its pose is `trajectory.csv`'s
   last row).
-- **Only `--agent rpt` keeps one**; with `falcon-yolo` or `stop` the variable
+- **Visual RPT keeps one in RAM, room RPT optionally on disk**; with `falcon-yolo` or `stop` the variable
   is refused at start-up, not ignored.
-- **The frozen configuration gains `method.frame_log` only when the variable
-  is set**, so earlier runs resume as they were; a run started with it is
-  resumed with it.
+- **The frozen RPT configuration records `method.frame_log`**: episode RAM by
+  default, disk when the variable is set. Do not resume a text-room run as a visual one.
 - **A frame that cannot be stored stops the run** (`FrameLogError`, an
   `ObjNavInternalError`): a full disk is never scored as a failed episode.
 - **One directory per run** (inside the run's output directory is fine). An

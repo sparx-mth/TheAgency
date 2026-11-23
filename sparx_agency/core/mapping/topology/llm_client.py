@@ -41,6 +41,8 @@ Ported from the SJTU ``semantic_mapper/llm_client.py``.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -58,6 +60,7 @@ from sparx_agency.core.mapping.topology.llm_answer_cache import request_key
 TRUNCATION_CHARS_PER_TOKEN = 6.0
 #: Below this many prompt characters the template's own tokens dominate and the ratio says nothing.
 TRUNCATION_MIN_CHARS = 2000
+DEFAULT_VISION_MODEL = "qwen2.5vl:7b"
 
 
 def _seed_from_env(raw: str) -> Optional[int]:
@@ -161,6 +164,7 @@ class LLMConfig:
     reasoning_num_ctx: int = 8192
     num_gpu: Optional[int] = None
     num_ctx: Optional[int] = None
+    num_batch: Optional[int] = None   # Ollama prefill tokens per batch, not concurrent requests
 
     def __post_init__(self) -> None:
         if not str(self.reasoning_model).strip():
@@ -169,30 +173,37 @@ class LLMConfig:
             self.num_ctx = int(self.reasoning_num_ctx)      # one model, one window: see ``num_ctx``
         if self.num_gpu is not None and (isinstance(self.num_gpu, bool) or int(self.num_gpu) < -1):
             raise ValueError("num_gpu must be None, -1 (all layers) or a non-negative layer count")
+        if self.num_batch is not None and (type(self.num_batch) is not int or self.num_batch < 1):
+            raise ValueError("num_batch must be a positive integer")
 
     @classmethod
-    def from_env(cls) -> "LLMConfig":
-        """Build a config from ``LLM_*`` environment variables."""
+    def from_env(cls, *, vision: bool = False) -> "LLMConfig":
+        """Build the text routes, or one bounded multimodal route for the ObjectNav frontier scorer."""
 
         def get(k: str, d: str) -> str:
             return os.environ.get(k, d)
 
+        model = get("LLM_MODEL", DEFAULT_VISION_MODEL if vision else "qwen2.5:3b-instruct")
+        ctx = get("LLM_NUM_CTX", "4096" if vision else "").strip()
+        batch = get("LLM_NUM_BATCH", "256" if vision else "").strip()
+        timeout = float(get("LLM_TIMEOUT_S", "120" if vision else "30"))
+        tokens = int(get("LLM_MAX_TOKENS", "32" if vision else "768"))
         return cls(
             backend=get("LLM_BACKEND", "ollama").strip().lower(),
             base_url=get("LLM_BASE_URL", "http://localhost:11434").rstrip("/"),
-            model=get("LLM_MODEL", "qwen2.5:3b-instruct"),
+            model=model,
             api_key=get("LLM_API_KEY", ""),
             temperature=float(get("LLM_TEMPERATURE", "0")),
-            timeout_s=float(get("LLM_TIMEOUT_S", "30")),
+            timeout_s=timeout,
             seed=_seed_from_env(get("LLM_SEED", "0")),
             keep_alive=get("LLM_KEEP_ALIVE", "30m"),
-            max_tokens=int(get("LLM_MAX_TOKENS", "768")),
-            reasoning_model=get("LLM_REASONING_MODEL", "qwen2.5:14b-instruct"),
-            reasoning_timeout_s=float(get("LLM_REASONING_TIMEOUT_S", "600")),
-            reasoning_max_tokens=int(get("LLM_REASONING_MAX_TOKENS", "2048")),
-            reasoning_num_ctx=int(get("LLM_REASONING_NUM_CTX", "8192")),
+            max_tokens=tokens,
+            reasoning_model=model if vision else get("LLM_REASONING_MODEL", "qwen2.5:14b-instruct"),
+            reasoning_timeout_s=timeout if vision else float(get("LLM_REASONING_TIMEOUT_S", "600")),
+            reasoning_max_tokens=tokens if vision else int(get("LLM_REASONING_MAX_TOKENS", "2048")),
+            reasoning_num_ctx=int(ctx or "4096") if vision else int(get("LLM_REASONING_NUM_CTX", "8192")),
             num_gpu=int(get("LLM_NUM_GPU", "").strip()) if get("LLM_NUM_GPU", "").strip() else None,
-            num_ctx=int(get("LLM_NUM_CTX", "").strip()) if get("LLM_NUM_CTX", "").strip() else None,
+            num_ctx=int(ctx) if ctx else None, num_batch=int(batch) if batch else None,
         )
 
     def models(self) -> Tuple[str, ...]:
@@ -216,15 +227,17 @@ class LLMClient:
     text for logging.
     """
 
-    def __init__(self, cfg: Optional[LLMConfig] = None, answers=None):
+    def __init__(self, cfg: Optional[LLMConfig] = None, answers=None, *, validate_answer=None):
         """Args:
             cfg: The connection settings; read from the environment when None.
             answers: An :class:`~sparx_agency.core.mapping.topology.llm_answer_cache.LLMAnswerStore`
                 that answers a request it holds and records every answer used, or None.
+            validate_answer: Optional JSON schema check before an answer enters the replay store.
         """
         self.cfg = cfg or LLMConfig.from_env()
         self.sess = requests.Session()
         self.answers = answers
+        self.validate_answer = validate_answer
         self.exclusive = None       # an ExclusiveColdStart (llm_exclusive.py): one request at a time, model reloaded
         self.last_reply: Dict[str, Any] = {}
 
@@ -236,7 +249,7 @@ class LLMClient:
 
     def chat_json(self, system: str, user: str,
                   temperature: Optional[float] = None,
-                  reasoning: bool = False) -> Dict[str, Any]:
+                  reasoning: bool = False, *, image_jpeg: Optional[bytes] = None) -> Dict[str, Any]:
         """Send system+user prompt, return the parsed JSON dict.
 
         Args:
@@ -252,12 +265,12 @@ class LLMClient:
             RuntimeError: The HTTP request failed after retry, or the
                 server reply had an unexpected shape.
         """
-        text = self.chat_text(system, user, temperature, reasoning=reasoning)
+        text = self.chat_text(system, user, temperature, reasoning=reasoning, image_jpeg=image_jpeg)
         return _best_effort_json(text)
 
     def chat_text(self, system: str, user: str,
                   temperature: Optional[float] = None,
-                  reasoning: bool = False) -> str:
+                  reasoning: bool = False, *, image_jpeg: Optional[bytes] = None) -> str:
         """Send system+user prompt, return the raw reply text."""
         t = self.cfg.temperature if temperature is None else float(temperature)
         route = _Route(model=self.cfg.reasoning_model if reasoning else self.cfg.model,
@@ -269,17 +282,25 @@ class LLMClient:
             raise ValueError(f"Unknown LLM_BACKEND: {self.cfg.backend!r}")
         key = entry = None
         if self.answers is not None:
+            digest = hashlib.sha256(image_jpeg).hexdigest() if image_jpeg is not None else None
             key = request_key(self.cfg.backend, route.model, system, user, t, self.cfg.seed if ollama else None,
-                              route.num_ctx if ollama else None, route.max_tokens, scope=self.answers.scope)
+                              route.num_ctx if ollama else None, route.max_tokens, scope=self.answers.scope,
+                              image_sha256=digest)
             entry = {"route": "reasoning" if reasoning else "default", "model": route.model, "system": system,
                      "user": user}
+            if digest is not None:
+                entry["image_sha256"] = digest
             stored = self.answers.get(key)
             if stored is not None:
                 self.answers.put(key, stored, dict(entry, source="replay"))
                 return stored
         self.last_reply = {}
-        text = self._ollama_chat(system, user, t, route) if ollama else self._openai_chat(system, user, t, route)
+        image = base64.b64encode(image_jpeg).decode("ascii") if image_jpeg is not None else None
+        chat = self._ollama_chat if ollama else self._openai_chat
+        text = chat(system, user, t, route, image=image) if image is not None else chat(system, user, t, route)
         if key is not None:
+            if self.validate_answer is not None:
+                self.validate_answer(_best_effort_json(text))
             self.answers.put(key, text, dict(entry, source="model", reply=dict(self.last_reply)))
         return text
 
@@ -309,7 +330,7 @@ class LLMClient:
 
     # -- Backends ------------------------------------------------------
     def _ollama_chat(self, system: str, user: str, temperature: float,
-                     route: "_Route") -> str:
+                     route: "_Route", image: Optional[str] = None) -> str:
         url = f"{self.cfg.base_url}/api/chat"
         options = {"temperature": temperature,
                    "num_predict": int(route.max_tokens)}
@@ -319,6 +340,8 @@ class LLMClient:
             options["seed"] = int(self.cfg.seed)
         if self.cfg.num_gpu is not None:
             options["num_gpu"] = int(self.cfg.num_gpu)
+        if self.cfg.num_batch is not None:
+            options["num_batch"] = self.cfg.num_batch
         payload = {
             "model": route.model,
             "stream": False,
@@ -330,6 +353,8 @@ class LLMClient:
                 {"role": "user", "content": user},
             ],
         }
+        if image is not None:
+            payload["messages"][1]["images"] = [image]
         if self.exclusive is not None:
             with self.exclusive.held():
                 self.exclusive.unload(self.sess, self.cfg.base_url, route.model)
@@ -344,11 +369,13 @@ class LLMClient:
             content = data["message"]["content"]
         except (KeyError, TypeError) as e:
             raise RuntimeError(f"unexpected Ollama reply: {data}") from e
+        if not isinstance(content, str):
+            raise ValueError("Ollama message has no text content")
         _refuse_truncation(data, len(system) + len(user), route.num_ctx)
         return content
 
     def _openai_chat(self, system: str, user: str, temperature: float,
-                     route: "_Route") -> str:
+                     route: "_Route", image: Optional[str] = None) -> str:
         url = f"{self.cfg.base_url}/chat/completions"
         payload = {
             "model": route.model,
@@ -360,14 +387,21 @@ class LLMClient:
                 {"role": "user", "content": user},
             ],
         }
+        if image is not None:
+            payload["messages"][1]["content"] = [
+                {"type": "text", "text": user},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image}}]
         r = self._post_with_retry(url, payload,
                                   extra_headers=self._auth_header(),
                                   timeout_s=route.timeout_s)
         data = r.json()
         try:
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
             raise RuntimeError(f"unexpected OpenAI-compat reply: {data}") from e
+        if not isinstance(content, str):
+            raise ValueError("OpenAI-compatible message has no text content")
+        return content
 
     # -- HTTP plumbing -------------------------------------------------
     def _auth_header(self) -> Dict[str, str]:

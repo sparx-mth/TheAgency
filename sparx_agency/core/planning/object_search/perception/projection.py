@@ -26,8 +26,7 @@ from sparx_agency.core.mapping.objects.box_occluder import depth_band_m, occlude
 from sparx_agency.core.mapping.objects.geometry import robust_bbox_depth, robust_mask_depth
 from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_optical
 
-#: Detector labels that name a staircase: terrain context for the building coordinator, never an object.
-STAIR_LABELS = frozenset(("stairs", "staircase"))
+from sparx_agency.core.planning.object_search.perception.target_prompts import STAIR_LABELS  # public re-export
 
 
 def observed_objects(observation, detections, confidence, diagnostics=None, masks=None):
@@ -163,5 +162,4 @@ def _supported_centroid(observation, box, transform, row, mask=None):
     row.update(status="projected", xyz=xyz.tolist(), height_range_m=[float(np.min(points[:, 2])), float(np.max(points[:, 2]))],
                radius_m=footprint_radius_m(box, float(depth), k.fx), range_near_m=near)
     return xyz
-
 

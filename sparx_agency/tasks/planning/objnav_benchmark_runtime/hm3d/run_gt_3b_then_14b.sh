@@ -196,7 +196,7 @@ run_stage() {   # stage number
   r="$(stage_root "$s")"; model="$(stage_model "$s")"; jobs="$(stage_jobs "$s")"; slots="$(stage_slots "$s")"; llm_vram="$(stage_llm_vram "$s")"
   if stage_complete "$r"; then say "stage $s ($model): already complete at $r"; commit_results "$s" "$r"; return 0; fi
   mkdir -p "$r"
-  local common=(--version v1 --perception ground-truth --jobs "$jobs" --full-records --record-log-only
+  local common=(--agent rpt_room_llm --version v1 --perception ground-truth --jobs "$jobs" --full-records --record-log-only
                 --stall-minutes "$STALL_MINUTES" --output "$r" --scenes $SCENE_ORDER)
   [[ "$SMOKE" == 1 ]] && common+=(--limit 1)
   local stage_env=(HAB_PY="$HAB_PY" OLLAMA_MODE="$OLLAMA_MODE" LLM_BASE_URL="$LLM_BASE_URL" OLLAMA_MODELS_DIR="$OLLAMA_MODELS_DIR"

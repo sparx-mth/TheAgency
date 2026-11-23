@@ -126,23 +126,29 @@ def test_the_preflight_probe_asks_the_server_never_the_answer_store(tmp_path):
     from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
     asked = []
 
-    def post(url, data=None, headers=None, timeout=None):
-        import json
-        payload = json.loads(data)
-        asked.append(payload["messages"][1]["content"])
-        content = '{"ok": true}' if "Return" in asked[-1] else '{"0": {"p": 0.5}, "1": {"p": 0.5}}'
-        return Response({"message": {"content": content}})
+    import json
+
+    def post(url, data=None, **kwargs):
+        if url.endswith("/api/show"):
+            return Response({"capabilities": ["completion", "vision"]})
+        asked.append(json.loads(data)["messages"][1])
+        return Response({"message": {"content": '{"probability": 0.42}'}})
 
     store = LLMAnswerStore(record_dir=tmp_path)
     raw = LLMClient(LLMConfig(model="m", reasoning_model="m"), answers=store)
     raw.sess = SimpleNamespace(post=post)
-    try:
-        VerifiedLLMClient(raw).probe()
-    except ObjNavInternalError:
-        pass                                   # the scripted oracle reply need not score; only the routing matters
-    assert asked and raw.answers is store, "the store is reattached after the probe"
+    VerifiedLLMClient(raw).probe()
+    assert len(asked) == 1 and len(asked[0]["images"]) == 1 and raw.answers is store
     assert store.stats == {"replayed": 0, "repeated": 0, "asked": 0, "recorded": 0}
     assert not list(tmp_path.glob("answers-*.jsonl")), "nothing of the probe enters the run's recorded answers"
+
+
+def test_a_provisioned_text_model_cannot_pass_the_visual_preflight():
+    from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
+    raw = LLMClient(LLMConfig(model="text-only"))
+    raw.sess = SimpleNamespace(post=lambda *a, **kw: Response({"capabilities": ["completion"]}))
+    with pytest.raises(ObjNavInternalError, match="does not advertise vision"):
+        VerifiedLLMClient(raw).probe()
 
 
 @pytest.mark.parametrize("url", ["http://user:secret@host", "http://host?key=secret", "file:///tmp/model"])
@@ -182,5 +188,4 @@ def test_real_http_service_pins_metadata_and_preserves_rgb():
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
-
 

@@ -56,7 +56,7 @@ import numpy as np
 
 from sparx_agency.core.planning.environment import OccupancyGrid2D
 from sparx_agency.core.planning.exploration.room_costs import FrontierCluster
-from sparx_agency.core.planning.object_search.rooms.opening_nodes import OpeningRegistry, merge_near_seed
+from sparx_agency.core.planning.exploration.spatial_ids import SpatialIds, merge_near_seed
 
 
 @dataclass(frozen=True)
@@ -94,9 +94,9 @@ class NodeSettings:
             raise ValueError("match_m (%r) cannot exceed merge_m (%r): two nodes of one action could claim one id"
                              % (self.match_m, self.merge_m))
 
-    def registry(self) -> OpeningRegistry:
+    def registry(self) -> SpatialIds:
         """A fresh id registry for one episode, matching at ``match_m``."""
-        return OpeningRegistry(match_m=self.match_m)
+        return SpatialIds(match_m=self.match_m)
 
 
 @dataclass(frozen=True, eq=False)
@@ -115,6 +115,7 @@ class FrontierNode:
         rows: Row index of every frontier cell of the node, seed cluster first.
         cols: Column index of every cell, same order.
         parts: How many clusters were merged into it.
+        goal_cells: The constituent clusters' goal cells, so the geometric fallback can also withhold a blocked node.
     """
 
     node_id: int
@@ -124,13 +125,14 @@ class FrontierNode:
     rows: np.ndarray
     cols: np.ndarray
     parts: int
+    goal_cells: Tuple[Tuple[int, int], ...] = ()
 
     @property
     def size_cells(self) -> int:
         return int(self.rows.size)
 
 
-def frontier_nodes(world: OccupancyGrid2D, clusters: Sequence[FrontierCluster], registry: OpeningRegistry,
+def frontier_nodes(world: OccupancyGrid2D, clusters: Sequence[FrontierCluster], registry: SpatialIds,
                    floor_id: int, settings: Optional[NodeSettings] = None) -> List[FrontierNode]:
     """The frontier nodes of one action, longest first, from the clusters of its frontier inventory.
 
@@ -162,5 +164,6 @@ def frontier_nodes(world: OccupancyGrid2D, clusters: Sequence[FrontierCluster], 
         seed = group[0]
         xy = point(seed)
         nodes.append(FrontierNode(node_id=int(registry.identify(int(floor_id), xy)), floor_id=int(floor_id), xy=xy,
-                                  cell=(int(seed.cell[0]), int(seed.cell[1])), rows=rows, cols=cols, parts=len(group)))
+                                  cell=(int(seed.cell[0]), int(seed.cell[1])), rows=rows, cols=cols, parts=len(group),
+                                  goal_cells=tuple(cluster.cell for cluster in group)))
     return nodes

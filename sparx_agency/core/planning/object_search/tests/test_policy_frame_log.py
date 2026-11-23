@@ -79,20 +79,21 @@ def test_reset_starts_the_next_episodes_log_and_each_episode_keeps_its_own_folde
     policy.reset(ep, gibson_label_mapper().target_labels("chair"))        # the same episode, begun again
     assert len(log) == 0 and log.store.directory == first and not list(first.glob("step_*.jpg"))
     policy.warmup_actions, policy._warmup_pending = policy.settings.warmup_steps, False
-    policy.peek.floor_ready = lambda: True
     policy.plan(frame(ep, 0, depth=3.0))
     header, records = read_frame_log(first)
     assert list(records) == ["step_000000.jpg"] and records["step_000000.jpg"].pose == AgentPose(0, 0, 0, 0)
     assert (header["episode_id"], header["target_category"]) == (ep.episode_id, ep.target_category)
 
 
-def test_without_a_frame_log_the_policy_keeps_none_and_its_run_record_is_the_same_either_way():
-    """A resume compares the recorded configuration verbatim: the log is not a setting of the method."""
+def test_without_an_explicit_log_the_policy_keeps_episode_frames_in_ram():
     plain, ep = make_policy(FakeDetector("bed"))
     logging, _ = make_policy(FakeDetector("bed"), frame_log=EpisodeFrameLog(MemoryFrameStore()))
-    assert plain.frame_log is None
-    assert plain.configuration() == logging.configuration() and "frame_log" not in plain.configuration()
+    assert isinstance(plain.frame_log.store, MemoryFrameStore)
+    assert plain.configuration() == logging.configuration()
     assert not plain.plan(frame(ep, 0, depth=3.0)).stop
+    assert len(plain.frame_log) == 1
+    plain.reset(ep, plain.target)
+    assert len(plain.frame_log) == 0
 
 
 class _Full(MemoryFrameStore):

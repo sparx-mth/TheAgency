@@ -24,13 +24,9 @@ on it, ``segmentation`` is on unless the policy config says otherwise (the
 instance masks are the point), and the run is **non-publishable**: it is the
 method's upper bound under ideal perception, not a benchmark result.
 
-``OBJNAV_FRAME_LOG_DIR=<dir>`` (since 2026-11-22) hands the room-search policy
-a frame log (``core/planning/object_search/frame_log``): every RGB frame it
-decides on is kept under that directory, one folder per episode, beside the
-index that maps each image's file name to its capture pose. It changes no
-decision; the run's record says where the frames went, and only when the
-variable is set. Only ``--agent rpt`` keeps one -- with another agent the
-variable is refused, not ignored.
+RPT's frontier VLM reads from its episode frame log. ``OBJNAV_FRAME_LOG_DIR=<dir>``
+puts the frames on disk instead of in RAM. With another agent the disk override
+is refused, not ignored.
 
 Importing this module loads no service client, model or simulator; the HTTP
 clients are imported when a policy is built.
@@ -39,15 +35,16 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
-import sys
 
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
+from sparx_agency.core.planning.object_search.perception.target_prompts import target_stair_prompts
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import (
     PERCEPTION_GROUND_TRUTH, PERCEPTION_SERVICE)
 
 #: The ``--agent`` choices every adapter CLI offers, and what each is.
-AGENT_CHOICES = ("rpt", "falcon-yolo", "stop")
-AGENT_HELP = ("rpt: the room-search method (LLM + RPT* + frontier/FALCON + closing). falcon-yolo: the "
+AGENT_CHOICES = ("rpt", "rpt_room_llm", "falcon-yolo", "stop")
+AGENT_HELP = ("rpt: target/stair detector and VLM-scored geometric frontiers. "
+              "rpt_room_llm: full detector vocabulary, watershed rooms and text LLM + RPT*. falcon-yolo: the "
               "exploration baseline -- goal-free planar FALCON, the same YOLO perception and the same "
               "closing, no LLM (core/planning/object_search/baselines/falcon_yolo.py). stop: the plumbing diagnostic")
 
@@ -63,31 +60,11 @@ class StopDiagnostic:
         return NavigationCommand.stop_here()
 
 
-def oracle_model_record(identity, reasoning_model, prompt):
-    """What a run record says of the model the node oracle asks, beside the prompt version it is asked under.
-
-    A wording is tuned per model (``core/mapping/topology/search_node_prompts.py``),
-    so the record names the model that answered and whether it is the one
-    the version was tuned on. A mismatch is no error -- any model may be
-    asked under any version -- and is said once on stderr, for whoever moved
-    the run to another model.
-
-    Args:
-        identity: The LLM service's verified identity (``VerifiedLLMClient.health()``):
-            the name is the service's own -- a stand-in answers as itself.
-        reasoning_model: The configured reasoning model, when the identity names none.
-        prompt: The policy's prompt record (``NodeOraclePrompt.describe()``).
-
-    Returns:
-        ``{"name", "digest", "prompt_tuned_on_it"}``.
-    """
-    name = identity.get("reasoning_model", reasoning_model)
-    if name != prompt["tuned_on"]:
-        print("[node oracle] %s is asked under prompt version %r, which was tuned on %s (room_search.oracle_prompt "
-              "selects another; core/mapping/topology/search_node_prompts.py lists them)"
-              % (name, prompt["version"], prompt["tuned_on"]), file=sys.stderr)
-    return {"name": name, "digest": (identity.get("models") or {}).get(name, {}).get("digest"),
-            "prompt_tuned_on_it": name == prompt["tuned_on"]}
+def detector_vocabulary(agent, mapper):
+    """Server vocabulary: a prompt allowlist for visual RPT, the fixed inference vocabulary otherwise."""
+    if agent != "rpt":
+        return mapper.vocabulary()
+    return tuple(dict.fromkeys(prompt for c in mapper.categories() for prompt in target_stair_prompts(mapper.target_labels(c))))
 
 
 def build_policy(args, label_mapper, defaults=None, ground_truth=None):
@@ -122,9 +99,12 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
             publish semantic frames.
     """
     from sparx_agency.core.planning.object_search.frame_log.episode_frame_log import FRAME_LOG_DIR_ENV, EpisodeFrameLog
-    frame_log = EpisodeFrameLog.from_env()             # OBJNAV_FRAME_LOG_DIR; None keeps no frames
-    if frame_log is not None and args.agent != "rpt":
-        raise ValueError("%s is set, but only --agent rpt keeps a frame log and this run asked for --agent %s; "
+    frame_log = EpisodeFrameLog.from_env()             # disk override; RPT supplies episode RAM otherwise
+    if args.agent not in AGENT_CHOICES:
+        raise ValueError("Unknown ObjectNav agent: %r" % args.agent)
+    visual = args.agent == "rpt"
+    if frame_log is not None and args.agent not in ("rpt", "rpt_room_llm"):
+        raise ValueError("%s is set, but only rpt and rpt_room_llm keep a frame log; this run asked for --agent %s; "
                          "unset it for this run" % (FRAME_LOG_DIR_ENV, args.agent))
     if args.agent == "stop":
         return StopDiagnostic(), {"method": "diagnostic-stop", "publishable": False}
@@ -172,18 +152,21 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
     config = client = answers = exclusive = None
     services = []
     if not baseline:
+        if visual:
+            settings.validate_frontier_method()
         from sparx_agency.core.mapping.topology.llm_client import LLMClient, LLMConfig
-        from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.llm import VerifiedLLMClient
+        from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.llm import VerifiedLLMClient, VerifiedRoomClient
         from sparx_agency.core.mapping.topology.llm_answer_cache import LLMAnswerStore
         from sparx_agency.core.mapping.topology.llm_exclusive import ExclusiveColdStart
-        config = LLMConfig.from_env()
+        from sparx_agency.core.planning.object_search.frontier_views.scoring import frontier_probability
+        config = LLMConfig.from_env(vision=visual)
         config.seed = args.seed
         answers = LLMAnswerStore.from_env()          # LLM_ANSWERS_RECORD / LLM_ANSWERS_REPLAY
         exclusive = ExclusiveColdStart.from_env(config.base_url) if config.backend == "ollama" else None
-        llm = LLMClient(config, answers=answers)
+        llm = LLMClient(config, answers=answers, validate_answer=frontier_probability if visual else None)
         llm.exclusive = exclusive
-        client = VerifiedLLMClient(llm)
-        services.append(("LLM", client))
+        client = VerifiedLLMClient(llm) if visual else VerifiedRoomClient(llm)
+        services.append(("VLM" if visual else "LLM", client))
     segmenter = None
     if oracle:
         from sparx_agency.tasks.planning.objnav_benchmark_runtime.ground_truth.perception import (
@@ -191,7 +174,8 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
         min_pixels = getattr(args, "ground_truth_min_pixels", None)
         on_object = getattr(args, "ground_truth_on_object_m", None)
         detector = GroundTruthDetector(ground_truth, DEFAULT_MIN_PIXELS if min_pixels is None else min_pixels,
-                                       on_object_m=DEFAULT_ON_OBJECT_M if on_object is None else on_object)
+                                       on_object_m=DEFAULT_ON_OBJECT_M if on_object is None else on_object,
+                                       episode_scoped=visual)
         services.append(("detector", detector))
         if settings.segmentation:
             segmenter = GroundTruthSegmenter(detector)
@@ -202,9 +186,11 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
             raise ValueError("--ground-truth-min-pixels is the oracle's; --perception is %r" % (args.perception,))
         if getattr(args, "ground_truth_on_object_m", None) is not None:
             raise ValueError("--ground-truth-on-object-m is the oracle's; --perception is %r" % (args.perception,))
-        detector = HttpDetector(public_service_url(args.detector_url), label_mapper.vocabulary(),
+        if visual and args.detector_backend != "yolo_world":
+            raise ValueError("--agent rpt requires YOLO-World or ground-truth perception for episode-specific prompts")
+        detector = HttpDetector(public_service_url(args.detector_url), detector_vocabulary(args.agent, label_mapper),
                                 expected_backend=args.detector_backend,
-                                timeout_s=getattr(args, "detector_timeout_s", 30.0))
+                                timeout_s=getattr(args, "detector_timeout_s", 30.0), **({"episode_scoped": True} if visual else {}))
         services.append(("detector", detector))
         if settings.segmentation:
             from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_segmenter import HttpSegmenter
@@ -231,28 +217,39 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
         policy = FalconYoloBaseline(detector, settings, segmenter=segmenter,
                                     baseline=BaselineSettings(**(baseline_overrides or {})))
         floor = settings.detection_confidence
-    else:
+    elif visual:
         from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy
         policy = RPTSearchPolicy(detector, client, settings, segmenter=segmenter, frame_log=frame_log)
+        floor = min(settings.detection_confidence, settings.target_closing.track_confidence)
+    else:
+        from sparx_agency.core.planning.object_search.rooms.legacy_policy import LegacyRoomSearchPolicy
+        policy = LegacyRoomSearchPolicy(detector, client, settings, segmenter=segmenter, frame_log=frame_log)
         floor = min(settings.detection_confidence, policy.door_settings.confidence)
     emitted = float(identities["detector"]["metadata"]["detector_config"]["conf_thresh"])
     if emitted > floor:
-        raise RuntimeError("Detector emission threshold hides door candidates; restart with --conf 0.05")
+        raise RuntimeError("Detector emission threshold hides required detections; use --conf <= %.2f" % floor)
     info = policy.configuration()
+    info["pipeline_variant"] = args.agent
+    if frame_log is not None:
+        info["frame_log"] = frame_log.describe()
     if config is not None:
         llm_config = asdict(config)
         llm_config.pop("api_key", None)
-        info.update(llm=llm_config, llm_identity=identities["LLM"])
-        info["node_oracle"]["model"] = oracle_model_record(identities["LLM"], config.reasoning_model,
-                                                             info["node_oracle"]["prompt"])
+        identity = identities["VLM" if visual else "LLM"]
+        info.update(llm=llm_config, llm_identity=identity)
+        if visual:
+            info["frontier_search"]["model"] = identity["model"]
+            info["episode_detector_prompts"] = {c: target_stair_prompts(label_mapper.target_labels(c))
+                                                for c in label_mapper.categories()}
+        else:
+            name = identity.get("reasoning_model", config.reasoning_model)
+            info["node_oracle"]["model"] = {"name": name, "digest": identity.get("models", {}).get(name, {}).get("digest"),
+                                             "prompt_tuned_on_it": info["node_oracle"]["prompt"]["tuned_on"] == name}
         # Only when set, so a run recorded before they existed still resumes against its frozen config.
         if answers is not None:
             info.update(llm_answers=answers.describe())
         if exclusive is not None:
             info.update(llm_exclusive=exclusive.describe())
-    if frame_log is not None:
-        # Only when set, as the answer store above: a run recorded without one resumes against its frozen config.
-        info.update(frame_log=frame_log.describe())
     if oracle:
         # No service, no URL, no timeout: the identity says what answered. A perception upper
         # bound is a diagnostic of the method, never a benchmark result -- publishable=False,
@@ -264,7 +261,7 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
                     ground_truth={"bypassed": ["detector", "segmenter"] if segmenter is not None else ["detector"],
                                   "min_pixels": detector.min_pixels, "on_object_m": detector.on_object_m, "confidence": 1.0,
                                   "goal_instances": "the publisher's goal object ids per scene and category",
-                                  "context_labels": ground_truth.categories.context_labels,
+                                  "context_labels": "stairs only" if visual else ground_truth.categories.context_labels,
                                   "category_table_sha256": identities["detector"]["metadata"]["checkpoint_sha256"]})
         if segmenter is not None:
             info.update(segmenter=identities["segmenter"], segmenter_url=None)

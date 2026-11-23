@@ -18,6 +18,34 @@ from sparx_agency.tasks.planning.objnav_benchmark.results_io import strict_json
 SCHEMA = "objnav_configuration_lock/1"
 
 
+def model_provenance(method):
+    """Comparison-arm model roles; historical records predate the explicit variant field."""
+    cfg, oracle = method.get("llm") or {}, method.get("node_oracle") or {}
+    frontiers = method.get("frontier_search") or {}
+    variant = method.get("pipeline_variant") or ("rpt" if frontiers else "rpt_room_llm" if oracle else "unspecified")
+    llm = {k: cfg.get(k) for k in ("backend", "temperature", "seed")}
+    if frontiers:
+        llm.update(visual=frontiers.get("model"), prompt=frontiers.get("prompt"), digest=(method.get("llm_identity") or {}).get("digest"))
+    else:
+        llm.update(labels=cfg.get("model"), oracle=cfg.get("reasoning_model"), oracle_num_ctx=cfg.get("reasoning_num_ctx"),
+                   oracle_max_tokens=cfg.get("reasoning_max_tokens"))
+    return {"pipeline_variant": variant, "llm": llm, "node_oracle": {"prompt": oracle.get("prompt"), "model": oracle.get("model")}}
+
+
+def model_report_rows(prov):
+    result = ["| pipeline variant | `%s` |" % prov["pipeline_variant"]]
+    llm = prov["llm"]
+    if "visual" in llm:
+        return result + ["| frontier VLM | `%s` (digest `%s`), prompt `%s` |" %
+                         (llm["visual"], (llm["digest"] or "?")[:19], llm["prompt"])]
+    oracle = prov["node_oracle"]
+    prompt, model = oracle.get("prompt") or {}, oracle.get("model") or {}
+    return result + ["| LLM, room labels | `%s` |" % llm["labels"],
+                     "| LLM, node oracle | `%s` (Ollama digest `%s`) |" % (llm["oracle"], (model.get("digest") or "?")[:19]),
+                     "| oracle prompt | version `%s`, digest `%s`, tuned on `%s`; tuned on the model that answered: **%s** |" %
+                     (prompt.get("version"), (prompt.get("sha256") or "?")[:16], prompt.get("tuned_on"), model.get("prompt_tuned_on_it"))]
+
+
 def source_fingerprint(package_root=None):
     """Hash actual Python sources, including dirty and untracked implementation."""
     root = Path(package_root) if package_root is not None else Path(__file__).resolve().parents[3]
@@ -159,4 +187,3 @@ def check_frozen_configuration(config, path, *, expected_episode_ids=None):
     if differences:
         raise ValueError("Frozen configuration changed: " + ", ".join(differences))
     return payload
-

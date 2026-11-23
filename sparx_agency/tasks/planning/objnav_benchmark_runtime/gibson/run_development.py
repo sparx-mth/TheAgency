@@ -36,7 +36,7 @@ def prepare(args):
         # Multi-storey development episodes are generated to need a floor change: the
         # benchmark default (no stair traversal) is lifted here, visibly in ``method``,
         # unless --policy-config says otherwise.
-        policy, method = _method(args, defaults={"allow_stair_traversal": True} if multistory else None)
+        policy, method = _method(args, defaults={"allow_stair_traversal": True} if multistory and args.agent == "rpt_room_llm" else None)
         protocol = env.protocol if multistory else DEVELOPMENT_PROTOCOL
         recorded = ids[:1] if getattr(args, "record_first", False) else ids
         display_counts = {scene: len(audit["levels"]) for scene, audit in
@@ -150,7 +150,7 @@ def parser():
     p.add_argument("--allow-sim-version-mismatch", action="store_true")
     p.add_argument("--allow-shared-gpu", action="store_true",
                    help="Explicit operator authorization after GPU ownership/memory preflight; frozen in run identity")
-    p.set_defaults(agent="rpt")
+    p.add_argument("--agent", choices=("rpt", "rpt_room_llm"), default="rpt")
     return p
 
 

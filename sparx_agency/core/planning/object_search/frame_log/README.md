@@ -3,9 +3,8 @@
 The method's visual memory, and the first piece of the VLM pipeline analysed in
 [`docs/papers/vlm-search-scoring-20261119`](../../../../../docs/papers/vlm-search-scoring-20261119/README.md):
 a decision that values places from images -- the past frames that look at a
-frontier cluster, handed to one VLM as a batch -- will read those frames from
-here. **Today the log only keeps.** Nothing reads it back during an episode
-yet, and it changes no decision.
+frontier cluster, handed to one VLM as a batch -- reads those frames from
+here on live RPT runs. The default store is episode-local RAM.
 
 ```text
  ObjNavObservation ─► EpisodeFrameLog.add()                  whoever is shown the frame feeds the log
@@ -25,7 +24,7 @@ yet, and it changes no decision.
 | `memory_store.py` | `MemoryFrameStore`: one episode's encoded frames in RAM |
 | `episode_frame_log.py` | `EpisodeFrameLog`: `begin(episode)`, `add(observation)`, `records`, `rgb(name)`; `from_env()` reads `OBJNAV_FRAME_LOG_DIR` |
 
-## Turning it on
+## Keeping the frames after an episode
 
 For a benchmark run, name a directory -- one per run; inside the run's own
 output directory is fine:
@@ -37,19 +36,19 @@ OBJNAV_FRAME_LOG_DIR=~/objnav_benchmark/frames/<run> python -m sparx_agency.task
 The one policy builder (`tasks/planning/objnav_benchmark_runtime/policy_factory.py`)
 reads the variable for every dataset entrypoint and hands the log to
 `RPTSearchPolicy(..., frame_log=...)`. The variable is inherited by a
-campaign's child processes, so it switches the log on for a whole campaign;
+campaign's child processes, so it switches persistence on for a whole campaign;
 each episode has its own folder, so the processes never write one file. The
-run's frozen configuration gains `method.frame_log` (where the frames went,
-the image format) **only when the variable is set**, so a run recorded
-without it still resumes. Only `--agent rpt` keeps a log: with another agent
-the variable is refused rather than ignored.
+run's frozen configuration records `method.frame_log` (RAM or disk, image
+format). A historical text-room run is not resumable as a visual run.
+`--agent rpt_room_llm` can also record frames on disk for paired replays, but
+does not read or score them. The other agents refuse the variable.
 
 In code, the log is one more thing the policy is built with, beside its
-detector and its LLM:
+detector and its VLM:
 
 ```python
 log = EpisodeFrameLog(MemoryFrameStore())            # or DiskFrameStore(root); FrameCodec("png") for lossless
-policy = RPTSearchPolicy(detector, llm, settings, frame_log=log)
+policy = RPTSearchPolicy(detector, vlm, settings, frame_log=log)
 ```
 
 ## What a disk store leaves

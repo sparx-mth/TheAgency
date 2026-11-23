@@ -2,8 +2,8 @@
 
 The method is a :class:`~sparx_agency.core.planning.objnav.interfaces.policy.SearchPolicy`.
 It never talks to a network, a model or a simulator itself: an **object
-detector**, an optional **box-prompted segmenter** and a **room-reasoning
-LLM** are handed to :class:`~sparx_agency.core.planning.object_search.policy.RPTSearchPolicy`
+detector**, an optional **box-prompted segmenter** and a **frontier-scoring
+VLM** are handed to :class:`~sparx_agency.core.planning.object_search.policy.RPTSearchPolicy`
 at construction, and this module says exactly what the method asks of each.
 The HTTP clients that satisfy these contracts live with the benchmark
 runtime (``tasks/planning/objnav_benchmark_runtime/services/``), because the
@@ -159,6 +159,14 @@ class RoomReasoner(Protocol):
 
     def chat_json(self, system: str, user: str, **kwargs: Any) -> Dict[str, Any]:
         """One completion, parsed as a JSON object."""
+        ...
+
+
+class VisualReasoner(Protocol):
+    """Image-bearing JSON completion used by the live frontier search."""
+
+    def chat_json(self, system: str, user: str, *, image_jpeg: bytes) -> Dict[str, Any]:
+        """Answer the prompt about this JPEG, not a text-only version of the question."""
         ...
 
 

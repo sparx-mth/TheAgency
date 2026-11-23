@@ -18,6 +18,19 @@ MAP_PANEL = (640, 720)
 SEARCH_PANEL = (320, 720)
 
 
+def _inventory_goals(inventory):
+    room_of = {}
+    if inventory is not None:
+        for label, goals in inventory.by_room.items():
+            for goal in goals:
+                room_of[id(goal)] = int(label) - 1
+    return [{"xy": [round(float(v), 3) for v in goal.xy], "cell": [int(v) for v in goal.cell],
+             "size_cells": int(goal.size_cells), "geodesic_m": round(float(goal.geodesic_m), 2),
+             "heading_error_deg": round(math.degrees(float(goal.heading_error_rad)), 1),
+             "utility": round(float(goal.utility), 4), "room": room_of.get(id(goal))}
+            for goal in (inventory.goals if inventory is not None else ())]
+
+
 def search_snapshot(policy):
     """What the room-search loop believes and intends, JSON-ready, for the panel and the trace.
 
@@ -29,6 +42,15 @@ def search_snapshot(policy):
     cannot disagree.
     """
     loop, graph, supervisor = (getattr(policy, name, None) for name in ("loop", "graph", "supervisor"))
+    frontiers = getattr(policy, "frontiers", None)
+    if frontiers is not None:
+        goals = _inventory_goals(frontiers.inventory)
+        return {"target": policy.target.query, "floor_id": policy.mapping.floor_id, "current": frontiers.current,
+                "frontier_nodes": [{"id": i, "xy": n.xy, "probability": frontiers.scores.get(i),
+                                    "state": frontiers.ledger.nodes[i].state, "frames": frontiers.ledger.nodes[i].frames}
+                                   for i, n in frontiers.nodes.items()],
+                "frontier_goals": goals, "accessible_frontiers": [g["xy"] for g in goals],
+                "frontier_inventory_step": frontiers.inventory_step, "order": list(frontiers.order)}
     if loop is None or graph is None:
         return {}
     world = getattr(policy, "last_world", None)
@@ -104,16 +126,6 @@ def search_snapshot(policy):
                  "arrived_by": building.arrived_by, "active_portal": building.active["id"] if building.active else None,
                  "selected_by": building.active.get("selected_by") if building.active else None}
     inventory = graph.frontier_inventory
-    room_of = {}
-    if inventory is not None:
-        for label, goals in inventory.by_room.items():
-            for goal in goals:
-                room_of[id(goal)] = int(label) - 1
-    frontier_goals = [{"xy": [round(float(v), 3) for v in goal.xy], "cell": [int(v) for v in goal.cell],
-                       "size_cells": int(goal.size_cells), "geodesic_m": round(float(goal.geodesic_m), 2),
-                       "heading_error_deg": round(math.degrees(float(goal.heading_error_rad)), 1),
-                       "utility": round(float(goal.utility), 4), "room": room_of.get(id(goal))}
-                      for goal in (inventory.goals if inventory is not None else ())]
     committed = getattr(loop, "_committed_room", None)
     entry = getattr(loop, "_entry", None)
     transit = None
@@ -127,7 +139,7 @@ def search_snapshot(policy):
             "accessible_frontiers": [list(goal.xy) for goal in inventory.goals] if inventory is not None else [],
             # The inventory in full (since 2026-10-22): a review pointed at a step reads WHY a boundary was or
             # was not a goal from here -- size, walk, facing, utility, the room credited -- not from a frame.
-            "frontier_goals": frontier_goals,
+            "frontier_goals": _inventory_goals(inventory),
             "frontier_inventory_step": getattr(policy, "_last_graph_step", None),
             "transit": transit,
             "entry_failures": [{"place": [round(float(v), 2) for v in place], "failures": int(count), "step": int(step)}
@@ -228,6 +240,9 @@ def method_snapshot(policy):
     building = getattr(policy, "building", None)
     atlas = building.policy.mapping.atlas.diagnostics() if building else {}
     state = hierarchy.machine.phase if hierarchy is not None else getattr(supervisor, "state", "starting")
+    frontiers = getattr(policy, "frontiers", None)
+    if frontiers is not None:
+        state = policy.telemetry.phase
     explorer = getattr(policy, "explorer", None)
     exploration = explorer.snapshot() if callable(getattr(explorer, "snapshot", None)) else None
     if exploration is not None and hierarchy is None and supervisor is None:
@@ -239,10 +254,12 @@ def method_snapshot(policy):
     closing = getattr(policy, "closing", None)
     if closing is not None and closing.active:
         state = "TARGET_" + closing.phase
-    return {"state": state, "floor_id": getattr(getattr(policy, "mapping", None), "floor_id", 0),
+    return {"state": state, "pipeline_variant": getattr(policy, "variant", getattr(policy, "name", None)),
+            "floor_id": getattr(getattr(policy, "mapping", None), "floor_id", 0),
             "target_closing": closing.diagnostics() if closing is not None else {},
             "control_counters": {"room_llm": getattr(graph, "queries", 0),
                                  "room_classifier": getattr(getattr(graph, "label_tracker", None), "queries", 0),
+                                 **({"frontier_vlm": frontiers.calls} if frontiers is not None else {}),
                                  "rpt": getattr(solver, "calls", 0),
                                  "astar": getattr(policy, "_plan_calls", 0)},
             "floor_atlas": atlas, "transition": building.transition.diagnostics() if building and building.transition else None,

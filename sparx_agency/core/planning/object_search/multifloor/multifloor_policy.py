@@ -97,8 +97,9 @@ def _flight_extent(path, anchor_z) -> float:
 
 
 class MultiFloorSearch:
-    def __init__(self, policy):
+    def __init__(self, policy, *, confinement_only=False):
         self.policy, self.params = policy, policy.settings.multifloor
+        self.confinement_only = confinement_only
         s = policy.settings
         #: ``RPTSettings.allow_stair_traversal``: False confines the search to the spawn
         #: storey -- stairs are still SEEN and placed (the guard masks them), never taken.
@@ -136,9 +137,9 @@ class MultiFloorSearch:
         self._departure_ignored = False  # one event per off-level excursion, not one per action
         #: The forbidden-mode retreat in force (:meth:`_retreat_to_storey`), or None.
         self._retreat = None
-        self.departure = FloorDepartureGuard(self)
+        self.departure = None if confinement_only else FloorDepartureGuard(self)
         #: The one switch to the other storey of the flight a stair spawn settled off (``spawn_switch.py``).
-        self.switch = SpawnStairsSwitch(self)
+        self.switch = None if confinement_only else SpawnStairsSwitch(self)
 
     @property
     def phase(self):
@@ -167,7 +168,7 @@ class MultiFloorSearch:
 
     def can_leave_floor(self, obs=None):
         """Pending unknown rooms block departure; classified or attempted rooms do not."""
-        return self.departure.ready(obs)
+        return self.departure is not None and self.departure.ready(obs)
 
     def prepare_observation(self, obs):
         """Current depth before atlas settlement; never previous-view support."""
@@ -192,7 +193,7 @@ class MultiFloorSearch:
                 self._confirm_storey(obs)
         if self.transition is None and atlas.floors and abs(obs.pose.z - height) > self.params.stable_height_m:
             if not self.allowed:
-                if self.storey_confirmed:
+                if self.storey_confirmed or self.confinement_only:
                     self._forbid_departure(obs, height)
                 # A provisional spawn storey: the atlas's own departure test decides, in ``observe``.
             else:
@@ -371,7 +372,8 @@ class MultiFloorSearch:
 
     def observe(self, obs):
         atlas = self.policy.mapping.atlas
-        self.switch.accept_arrival(obs)
+        if self.switch is not None:
+            self.switch.accept_arrival(obs)
         if atlas.active_id != self.floor_id:
             old = self.floor_id
             self.floor_id, self.entered_step = atlas.active_id, obs.step
@@ -379,8 +381,9 @@ class MultiFloorSearch:
             self.storey_confirmed = True              # the atlas settled on it: a storey, whatever the spawn was
             old_height = atlas.floors[old].elevation_m if old in atlas.floors else obs.pose.z
             new_height = atlas.floors[self.floor_id].elevation_m
-            self.switch.arrived(obs, self.floor_id, new_height)
-            if was_provisional and not self.allowed:
+            if self.switch is not None:
+                self.switch.arrived(obs, self.floor_id, new_height)
+            if was_provisional and not self.allowed and not self.confinement_only:
                 self.switch.settled(obs, self.floor_id, old_height, new_height, "arrival")
             reason = self.transition.completion_reason if self.transition else atlas.completion_reason
             self.events.append({"action": obs.step, "event": "floor_arrival", "source": old,
@@ -411,7 +414,7 @@ class MultiFloorSearch:
             if not atlas.floors or abs(obs.pose.z - atlas.elevation_m) <= self.params.stable_height_m:
                 self._discover(obs)
         if atlas.in_transition and self.transition is None:
-            if not self.allowed and self.storey_confirmed:
+            if not self.allowed and (self.storey_confirmed or self.confinement_only):
                 self._forbid_departure(obs, atlas.elevation_m)
             else:
                 direction = 1 if obs.pose.z > atlas.elevation_m else -1
@@ -521,6 +524,13 @@ class MultiFloorSearch:
         With stair traversal forbidden nothing is selected, approached or
         climbed here, and a portal somehow left active is deferred.
         """
+        if self.confinement_only:
+            # Keep measured treads, drop masks and the existing trail retreat, never select a flight.
+            if self.traversing:
+                return self._retreat_to_storey(obs)
+            if self.semantic_stair_hint or self.stair_hint_pending:
+                return self._inspect(obs, exhausted=False)
+            return None
         if not self.allowed and not self.traversing:
             # The one exception: the switch to the other storey of the flight a stair spawn came off (spawn_switch.py).
             if self.active is not None and not self.switch.owns(self.active):
@@ -654,7 +664,7 @@ class MultiFloorSearch:
             raise RuntimeError("Cannot abandon a committed transition before verified source return")
         self.events.append({"action": obs.step, "event": "portal_deferred", "reason": reason,
                             "portal_id": self.active["id"] if self.active else None})
-        if self.switch.owns(self.active):
+        if self.switch is not None and self.switch.owns(self.active):
             self.switch.abandoned(obs, reason)
         if self.active and self.active.get("selected_by") == "spawn_departure":
             self._departure_ended = obs.step
@@ -680,7 +690,7 @@ class MultiFloorSearch:
         self.terrain.blocked(obs.pose, self.policy.episode.action_spec.forward_step_m)
 
     def filter_action(self, obs, action):
-        guarded = self.departure.filter_action(obs, action)
+        guarded = self.departure.filter_action(obs, action) if self.departure else action
         if guarded != action:
             return guarded
         if not self.traversing:
@@ -701,18 +711,19 @@ class MultiFloorSearch:
     def diagnostics(self):
         return {"phase": self.phase, "stair_source": self.params.stair_source,
                 "allow_stair_traversal": self.allowed, "storey_confirmed": self.storey_confirmed,
-                "spawn_switch": self.switch.diagnostics(),
+                "spawn_switch": self.switch.diagnostics() if self.switch else None,
                 "atlas": self.policy.mapping.atlas.diagnostics(),
                 "transition": self.transition.diagnostics() if self.transition else None,
                 "trail_retreat": ({k: self._retreat[k] for k in ("started", "index", "given_up", "blocked")}
                                   if self._retreat is not None else None),
                 "completed_transitions": list(self.completed), "safety_vetoes": self.safety_vetoes,
-                "room_coverage": self.policy.peek.diagnostics()["coverage"],
-                "coverage_vetoes": self.departure.vetoes,
-                "floor_contexts": self.policy.floors.diagnostics(), "events": list(self.events),
+                "room_coverage": None if self.confinement_only else self.policy.peek.diagnostics()["coverage"],
+                "coverage_vetoes": self.departure.vetoes if self.departure else 0,
+                "floor_contexts": self.policy.floors.diagnostics() if not self.confinement_only else [],
+                "events": list(self.events),
                 "portals": [{k: v for k, v in q.items() if k != "path"} for q in self.portals],
                 "active_portal": self.active["id"] if self.active else None,
                 "selected_by": self.active.get("selected_by") if self.active else None,
                 "entered_step": self.entered_step, "arrived_by": self.arrived_by, "arrived_step": self.arrived_step,
-                "decides_floor_changes": "allowance (%d actions) + RPT* over portals" % self.params.floor_search_actions}
-
+                "decides_floor_changes": "none: stair avoidance only" if self.confinement_only else
+                                      "allowance (%d actions) + RPT* over portals" % self.params.floor_search_actions}

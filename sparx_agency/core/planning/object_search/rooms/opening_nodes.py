@@ -61,6 +61,8 @@ scales the model's number down for a gap onto a strip -- never for a
 """
 from __future__ import annotations
 
+from sparx_agency.core.planning.exploration.spatial_ids import SpatialIds, merge_near_seed
+
 from dataclasses import dataclass
 import math
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -429,7 +431,7 @@ def room_exits(openings: Sequence) -> Dict[int, RoomExits]:
             for pid, (n, doors, seen, unseen) in counts.items()}
 
 
-class OpeningRegistry:
+class OpeningRegistry(SpatialIds):
     """Sticky opening ids per storey, and the openings already looked into.
 
     Lives on the policy for the episode: ids are unique across the building,
@@ -437,26 +439,9 @@ class OpeningRegistry:
     """
 
     def __init__(self, match_m: float = 1.0, done_m: float = 1.0):
-        self.match_m, self.done_m = float(match_m), float(done_m)
-        self._known: Dict[int, Dict[int, Tuple[float, float]]] = {}
+        super().__init__(match_m)
+        self.done_m = float(done_m)
         self._peeked: Dict[int, List[Dict]] = {}
-        self._next = 0
-
-    def identify(self, floor: int, xy: Tuple[float, float]) -> int:
-        """The id of the known opening within ``match_m`` of ``xy`` (moved to it), else a new id."""
-        known = self._known.setdefault(int(floor), {})
-        best = None
-        for index, where in known.items():
-            distance = math.dist(where, xy)
-            if distance <= self.match_m and (best is None or distance < best[0]):
-                best = (distance, index)
-        if best is not None:
-            known[best[1]] = (float(xy[0]), float(xy[1]))
-            return best[1]
-        index = self._next
-        self._next += 1
-        known[index] = (float(xy[0]), float(xy[1]))
-        return index
 
     def peeked(self, floor: int, xy: Tuple[float, float]) -> bool:
         """Whether a completed peek already covers ``xy``: within ``done_m`` of its threshold, or inside what it looked at.
@@ -620,40 +605,6 @@ def unknown_view_for(policy, world):
     sight = getattr(policy, "sight", None)
     return UnknownView(world, cone_from_camera(k.width, k.fx, float(camera.max_depth_m), float(blind or 0.0)),
                        resolved=sight.resolved(world) if sight is not None else None)
-
-
-def merge_near_seed(items: Sequence, radius_m: float, xy=None) -> List[List]:
-    """Group ``items`` greedily, in the order given: each joins the first group whose SEED lies within ``radius_m``, else seeds a new one.
-
-    The seed of a group is its first item, so the order is the caller's
-    statement of which item stands for a group -- the best exit of a
-    doorway (:func:`detect_openings`), the longest boundary of a frontier
-    node (``frontier_views/nodes.py``). Seeds end up more than ``radius_m``
-    apart from every earlier seed, which is what keeps two groups from
-    claiming one sticky id when ``radius_m`` is at least the registry's
-    ``match_m``.
-
-    Args:
-        items: What to group, best first.
-        radius_m: An item this close to a group's seed is part of it.
-        xy: ``item -> (x, y)`` in metres; the item's own ``xy`` by default.
-
-    Returns:
-        The groups, in seed order; every group lists its seed first.
-    """
-    where = xy if xy is not None else (lambda item: item.xy)
-    groups: List[List] = []
-    seeds: List[Tuple[float, float]] = []
-    for item in items:
-        point = where(item)
-        for group, seed in zip(groups, seeds):
-            if math.dist(seed, point) <= radius_m:
-                group.append(item)
-                break
-        else:
-            groups.append([item])
-            seeds.append(point)
-    return groups
 
 
 def detect_openings(policy, obs, world, settings: OpeningSettings, registry: OpeningRegistry) -> List[Opening]:
@@ -828,4 +779,3 @@ def opening_options(policy, openings: Sequence[Opening]) -> List[OpeningOption]:
         node = SearchNode(id=opening.node_id, kind=OPENING, label=opening.label, objects=tuple(opening.glimpsed), via=via)
         out.append(OpeningOption(node_id=opening.node_id, opening=opening, node=node))
     return out
-

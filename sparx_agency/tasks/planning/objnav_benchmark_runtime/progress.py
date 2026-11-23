@@ -44,7 +44,7 @@ HEARTBEAT_NAME = "heartbeat.json"
 HEARTBEAT_INTERVAL_S = 30.0
 
 #: The policy diagnostics a lean record keeps whole (all small, all counters or verdicts).
-LEAN_POLICY_KEYS = ("method", "rooms", "max_rooms", "landmarks", "warmup", "llm_queries", "oracle_reuses", "llm_answers",
+LEAN_POLICY_KEYS = ("method", "pipeline_variant", "detector_prompts", "rooms", "max_rooms", "landmarks", "warmup", "llm_queries", "oracle_reuses", "llm_answers",
                     "room_label_queries", "room_labels_held", "room_labels_dining_downgraded", "room_labels_shape_ruled",
                     "plan_calls", "duplicates_removed", "blocked", "floor_revisions",
                     "oracle_repair_attempts", "oracle_repair_successes", "target_closing", "target_pursuit", "spawn_floor_guard",
@@ -342,6 +342,9 @@ def lean_episode_info(info: Dict[str, Any]) -> Dict[str, Any]:
     for key in LEAN_POLICY_KEYS:
         if key in policy:
             lean[key] = _prune(policy[key])
+    if "frontier_search" in policy:
+        frontiers = policy["frontier_search"]
+        lean["frontier_search"] = {key: frontiers[key] for key in ("calls", "counts", "current")}
     loop = policy.get("room_search_loop")
     if isinstance(loop, dict):
         lean["room_search_loop"] = {"stats": loop.get("stats"), "second_pass": loop.get("second_pass"),

@@ -8,10 +8,10 @@ the target lies behind a frontier. It answers, from geometry alone and before
 any model is asked: **for each frontier node, which one to three logged frames
 show it best, and where in each picture it lies.**
 
-**Nothing in the policy calls this yet.** It is exercised by its tests and by
-the offline replay of recordings
-(`tasks/planning/objnav_benchmark_runtime/frontier_view_replay.py`), which is
-how the numbers below were obtained. It changes no decision.
+`RPTSearchPolicy` runs this on live observations. The offline replay
+(`tasks/planning/objnav_benchmark_runtime/frontier_view_replay.py`) exercises
+the same geometry without inference; its historical numbers below are not
+live VLM accuracy or speed measurements.
 
 ```text
  FrontierInventory.clusters ─► frontier_nodes()  ─► [FrontierNode]      the places to ask about: cells, goal point, sticky id
@@ -30,6 +30,7 @@ how the numbers below were obtained. It changes no decision.
 | `selection.py` | `select_views()`, `NodeViews`, `FrameView`: the greedy choice of one to three frames per node, the window in each, the reason when there is none |
 | `score_ledger.py` | `ScoreLedger`: the score-once rule -- which node is due, which is done, which is blocked |
 | `settings.py` | `ViewSettings`: every range, share and threshold of the two modules above, in one frozen record |
+| `scoring.py`, `search.py` | Mark selected frames, ask the VLM, retain independent probabilities and plan to the head of the RPT* order with A* |
 
 ## The unit: a frontier node
 
@@ -162,21 +163,27 @@ It holds no probability and asks no model: `observe(step, ids)`, `due(views)`,
 `min_age_steps` (0) holds a node back until it has been there that long. The
 default is the rule as decided; the replay is why the knob exists (below).
 
-## How it will be wired
+## Live decisions
 
-Not wired; this is the shape the pieces were cut to, per decision:
+On each new observation the policy logs RGB, updates the observed map, and
+builds the current floor's reachable inventory. In transit between storeys
+there is no new floor map: the frame is kept but no planar nodes are offered.
+`FrontierSearch.observe` selects views for pending nodes only. Each due node
+gets its own red outline on each selected frame, even if another node uses
+the same frame. One JPEG (up to three views side by side, each at most 640 px
+on its long edge) and the target's name go in one request. Only a numeric,
+finite `probability` in [0, 1] completes a score. A bad reply or outage arms
+the fallback service back-off, not a fabricated score. Identity drift or a
+broken frame log stops the run.
 
-```python
-nodes = frontier_nodes(world, inventory.clusters, registry, floor_id)        # registry: NodeSettings().registry(), one per episode
-ledger.observe(step, [node.node_id for node in nodes])
-pending = [node for node in nodes if node.node_id in set(ledger.pending())]
-views = select_views(world, pending, frame_log.records, camera, settled=sight.resolved(world), reference_z=pose.z)
-for node_id in ledger.due(views):
-    images = [(frame_log.rgb(view.name), view.window) for view in views[node_id].views]
-    ...                                                                      # one question about this node; keep the answer under node_id
-    ledger.mark_scored(node_id, step, views[node_id].names)
-# RPT*: build_instance(world, cost, {id: node.xy}, {id: kept answer}, depot_xy)
-```
+When search owns motion, `build_instance` gets the current candidate
+positions and their stored probabilities without renormalization. It prices
+travel from the current pose on the observed clearance map. The policy keeps
+the selected ID while eligible and rechecks the A* route for safety each
+step. Arrived, absent, blocked and retired goals are not offered. With no
+usable route it invokes the existing geometric exploration fallback. No text
+room classification or room-oracle call is made. The full episode record
+includes the ledger, probabilities and frame names under `frontier_search`.
 
 ## What the first replay found (2026-11-22)
 

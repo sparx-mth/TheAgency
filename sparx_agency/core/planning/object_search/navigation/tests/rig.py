@@ -33,7 +33,9 @@ def doorway_world(width_m=0.8, size=120):
 
 def doorway_policy(tilt=True, **overrides):
     """A policy with the LOOK pair (the look-down needs it), warmed up, on the 20 m synthetic map."""
-    return make_policy(FakeDetector("bed"), FakeLLM(), actions=body_actions(tilt=tilt), **overrides)
+    from sparx_agency.core.planning.object_search.policy import LegacyRoomSearchPolicy
+    return make_policy(FakeDetector("bed"), FakeLLM(), actions=body_actions(tilt=tilt), policy_type=LegacyRoomSearchPolicy,
+                       **overrides)
 
 
 def observe(ep, step, x, y, yaw, pitch=0.0):

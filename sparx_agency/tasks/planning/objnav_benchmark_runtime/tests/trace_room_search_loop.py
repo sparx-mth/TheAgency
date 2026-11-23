@@ -27,7 +27,7 @@ from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.episode import ObjNavEpisode
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.gibson.protocol import PROTOCOL
-from sparx_agency.core.planning.object_search.policy import RPTSearchPolicy, RPTSettings
+from sparx_agency.core.planning.object_search.policy import LegacyRoomSearchPolicy, RPTSettings
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import FakeDetector, FakeLLM, observation
 
 
@@ -43,7 +43,7 @@ def execute(converter, pose, command, spec):
 def main(steps=60):
     episode = ObjNavEpisode("synthetic/0", "synthetic", "gibson", "val", "chair",
                             PROTOCOL.camera(), PROTOCOL.actions(), 500)
-    policy = RPTSearchPolicy(FakeDetector("bed"), FakeLLM(), RPTSettings())
+    policy = LegacyRoomSearchPolicy(FakeDetector("bed"), FakeLLM(), RPTSettings())
     policy.reset(episode, gibson_label_mapper().target_labels("chair"))
     pose = AgentPose(0.0, 0.0, 0.0, 0.0)
     spec = episode.action_spec
@@ -80,4 +80,3 @@ def main(steps=60):
 
 if __name__ == "__main__":
     main()
-

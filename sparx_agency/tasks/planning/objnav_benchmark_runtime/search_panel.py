@@ -251,6 +251,15 @@ def render_search_panel(search, size=(320, 720)):
     """Draw the search block of a snapshot as one text column of ``size`` (w, h)."""
     image = np.full((size[1], size[0], 3), 24, np.uint8)
     col = _Column(image)
+    if search and "frontier_nodes" in search:
+        col.line("TARGET: %s" % search["target"], CYAN, bold=True)
+        col.line("VLM frontiers | floor %s" % search["floor_id"])
+        col.line("RPT* order: %s" % search["order"])
+        col.gap()
+        for node in search["frontier_nodes"]:
+            col.line("F%d  %s  p=%s" % (node["id"], node["state"], _fmt(node["probability"]).strip()),
+                     GREEN if node["id"] == search["current"] else WHITE)
+        return image
     for section in (_header, _order, _rooms, _openings, _objects, _events):
         section(col, search or {})
         if col.y > col.bottom:

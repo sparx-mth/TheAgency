@@ -38,10 +38,10 @@ class GroundTruthSource:
             part of the oracle.
     """
 
-    def __init__(self, label_mapper, categories=HM3D_TABLE):
+    def __init__(self, label_mapper, categories=HM3D_TABLE, *, vocabulary=None):
         self.label_mapper = label_mapper
         self.categories = categories
-        self.vocabulary = tuple(label_mapper.vocabulary())
+        self.vocabulary = tuple(label_mapper.vocabulary() if vocabulary is None else vocabulary)
         self.labels: Dict[int, str] = {}
         self.scene_key: Optional[str] = None
         self.scene_report: Dict[str, object] = {}

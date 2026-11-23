@@ -151,24 +151,72 @@ def test_the_factory_hands_the_room_search_policy_the_frame_log_the_variable_nam
     assert method["frame_log"] == {"schema": "objnav_frame_log/1", "image": {"format": "jpg", "jpeg_quality": 95},
                                    "store": {"kind": "disk", "root": str(tmp_path / "frames")}}
     json.dumps(method)
-    assert "frame_log" not in policy.configuration(), "the method's own settings do not change"
+    assert policy.configuration()["frame_log"] == method["frame_log"]
     assert not (tmp_path / "frames").exists(), "nothing is written before an episode begins"
 
 
-def test_without_the_variable_the_policy_keeps_no_frames_and_the_record_gains_no_key(monkeypatch, stand_in_llm):
-    """The resume lock compares the recorded configuration verbatim: runs recorded before the log still resume."""
+def test_without_a_disk_override_the_factory_records_the_live_ram_log(monkeypatch, stand_in_llm):
     monkeypatch.delenv(FRAME_LOG_DIR_ENV, raising=False)
     policy, method = build_policy(arguments(agent="rpt"), MAPPER, ground_truth=source_with({2: "chair"}))
-    assert policy.frame_log is None and "frame_log" not in method
+    assert policy.frame_log.describe() == method["frame_log"]
+    assert method["frame_log"]["store"] == {"kind": "memory"}
     monkeypatch.setenv(FRAME_LOG_DIR_ENV, "  ")
-    assert build_policy(arguments(agent="rpt"), MAPPER, ground_truth=source_with({2: "chair"}))[0].frame_log is None
+    assert build_policy(arguments(agent="rpt"), MAPPER, ground_truth=source_with({2: "chair"}))[1]["frame_log"] == method["frame_log"]
+
+
+def test_factory_runs_the_image_client_and_real_planners_through_warmup(monkeypatch):
+    import base64
+    import math
+
+    import requests
+    from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
+    from sparx_agency.core.planning.objnav.types.pose import AgentPose
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_method import observation
+    from sparx_agency.tasks.planning.objnav_benchmark_runtime.tests.test_runtime_boundaries import Response
+    from dataclasses import replace
+
+    model = "fixture-vl"
+    monkeypatch.setenv("LLM_BACKEND", "ollama")
+    monkeypatch.setenv("LLM_MODEL", model)
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434")
+    monkeypatch.delenv(FRAME_LOG_DIR_ENV, raising=False)
+    images = []
+
+    def get(session, url, **kwargs):
+        assert url.endswith("/api/tags")
+        return Response({"models": [{"name": model, "digest": "fixture"}]})
+
+    def post(session, url, data=None, **kwargs):
+        if url.endswith("/api/show"):
+            return Response({"capabilities": ["vision"]})
+        assert url.endswith("/api/chat")
+        request = json.loads(data)
+        assert request["model"] == model
+        encoded, = request["messages"][1]["images"]
+        images.append(FrameCodec().decode(base64.b64decode(encoded)))
+        return Response({"message": {"content": '{"probability":0.7}'}})
+
+    monkeypatch.setattr(requests.Session, "get", get)
+    monkeypatch.setattr(requests.Session, "post", post)
+    p, _ = build_policy(arguments(agent="rpt"), MAPPER, defaults={"map_size_m": 20.0}, ground_truth=source_with({2: "chair"}))
+    assert len(images) == 1, "one multimodal preflight, no room-model probes"
+    p.detector = SeesNothing()  # only perception is stubbed; no simulator annotations in these synthetic observations
+    ep, _ = building(episodes=1).reset("demo-000")
+    p.reset(ep, MAPPER.target_labels("chair"))
+    for step in range(p.warmup_turns + 1):
+        obs = replace(observation(ep, step, depth=2.0), pose=AgentPose(0, 0, 0, math.radians(30 * step)))
+        command = p.plan(obs)
+        if step < p.warmup_turns:
+            assert command.info["kind"] == "warmup"
+            p.notify_action(obs, DiscreteAction.TURN_LEFT)
+    assert p.frontiers.calls == len(images) - 1 > 0 and p.solver.calls > 0
+    assert command.waypoints and command.info["probability"] == 0.7
 
 
 @pytest.mark.parametrize("agent", ["falcon-yolo", "stop"])
 def test_an_agent_that_keeps_no_frame_log_refuses_the_variable_instead_of_ignoring_it(agent, monkeypatch, tmp_path):
     monkeypatch.setenv(FRAME_LOG_DIR_ENV, str(tmp_path / "frames"))
-    with pytest.raises(ValueError, match="OBJNAV_FRAME_LOG_DIR is set, but only --agent rpt keeps a frame log "
-                                         "and this run asked for --agent %s" % agent):
+    with pytest.raises(ValueError, match="only rpt and rpt_room_llm keep a frame log; this run asked for --agent %s" % agent):
         build_policy(arguments(agent=agent), MAPPER, ground_truth=source_with({2: "chair"}))
     monkeypatch.delenv(FRAME_LOG_DIR_ENV)
     policy, method = build_policy(arguments(agent=agent), MAPPER, ground_truth=source_with({2: "chair"}))

@@ -7,7 +7,7 @@ from typing import Optional
 
 import numpy as np
 
-from sparx_agency.core.common.types import normalize_angle
+from sparx_agency.core.common.types import Pose2D, normalize_angle
 from sparx_agency.core.planning.objnav.action_converter.action_choice import pitch_action, turn_action
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.object_search.closing.approach_history import ApproachHistory
@@ -749,8 +749,9 @@ class TargetClosing:
     centring tilt per inspection) at or above ``stop_confidence``.
     """
 
-    def __init__(self, policy):
+    def __init__(self, policy, *, target_only=False):
         self.policy, self.settings = policy, policy.settings.target_closing
+        self.target_only = target_only
         self.path = TargetApproachPath(policy)
         self.rejected = []                 # (anchor xyz, floor id, action, radius m, why) per released candidate
         self.releases = 0
@@ -1109,7 +1110,7 @@ class TargetClosing:
                 if self._rejected_nearby(xyz, p.mapping.floor_id, override=override, here=here) or self._boxed_in_here(obs):
                     self.same_spot_rejections += 1
                     continue
-            if not self.locked and contradicted_by_map(p, label, xyz, rows[-1].get("radius_m")) is not None:
+            if not self.target_only and not self.locked and contradicted_by_map(p, label, xyz, rows[-1].get("radius_m")) is not None:
                 self.map_rejections += 1                       # a confirmed non-target object stands here
                 continue
             doubt = self._suspect(obs, label, xyz) if (s.context_check and not self.locked) else None
@@ -1276,7 +1277,8 @@ class TargetClosing:
             self.verification_yaw = obs.pose.yaw
             p.route_memory.clear("target_takeover")
             p._route = p._goal = None
-            p.peek.cancel(obs, "target_takeover", restore=False)
+            if not self.target_only:
+                p.peek.cancel(obs, "target_takeover", restore=False)
             p.camera_control.inspection = None
             glances = getattr(p, "glances", None)
             if glances is not None and glances.active is not None:
@@ -1352,7 +1354,8 @@ class TargetClosing:
                 self.suspect = doubt
             if self.backoff is None or not (self.backoff.state == "pending" or self.backoff.active):
                 self.locked |= self._confirmed()
-            p._target_xy, p._target_step, p._target_floor_id = self.xyz[:2], obs.step, self.floor_id
+            if not self.target_only:
+                p._target_xy, p._target_step, p._target_floor_id = self.xyz[:2], obs.step, self.floor_id
         else:
             glimpsed = False
             if not self.locked:
@@ -1368,7 +1371,8 @@ class TargetClosing:
                 else:
                     self.count = 0
                     self.sightings = []
-            self._support_resighting(obs)
+            if not self.target_only:
+                self._support_resighting(obs)
         if self.history is not None and self.xyz is not None:
             self.history.record(here, math.dist(here, self.xyz[:2]), obs.step)
         if self.backoff is not None and (self.backoff.state == "pending" or self.backoff.active):
@@ -1403,7 +1407,7 @@ class TargetClosing:
             else:
                 self._release(obs)
             return
-        if self.locked and s.release_on_failed_inspection and self.anchor is not None:
+        if not self.target_only and self.locked and s.release_on_failed_inspection and self.anchor is not None:
             landmark = contradicted_by_map(p, self.label or "", self.anchor)
             if landmark is not None and self._is_support(landmark.class_name):
                 landmark = None                # the surface the target stands on: the same spot, not another object
@@ -1450,7 +1454,8 @@ class TargetClosing:
             self.bearing_clipped_starts += 1
         p.route_memory.clear("target_bearing")
         p._route = p._goal = None
-        p.peek.cancel(obs, "target_bearing", restore=False)
+        if not self.target_only:
+            p.peek.cancel(obs, "target_bearing", restore=False)
         p.camera_control.inspection = None
         glances = getattr(p, "glances", None)
         if glances is not None and glances.active is not None:
@@ -1566,6 +1571,18 @@ class TargetClosing:
         if abs(error) > turn + 1e-6:
             return NavigationCommand.hold(final_yaw=normalize_angle(obs.pose.yaw + error),
                                           info=dict(info, bearing_step="face the detection"))
+        if self.target_only:
+            # A distant RGB box is a direction, not range or proof of free floor. Check the
+            # actual discrete step, not an invented object position beyond the sensor horizon.
+            start = Pose2D(*here, obs.pose.yaw)
+            end = Pose2D(start.x + actions.forward_step_m * math.cos(start.yaw),
+                         start.y + actions.forward_step_m * math.sin(start.yaw))
+            gx, gy = world.world_to_grid(end.x, end.y)
+            if (not world.in_bounds(gx, gy) or world.grid[gy, gx] != world.values.free or
+                    p.planner.path_collides(world, [start, end], passable_start=start)):
+                self._end_bearing(obs, "no safe observed step on the bearing")
+                return NavigationCommand.hold(final_yaw=normalize_angle(obs.pose.yaw + error),
+                                              info=dict(info, bearing_step="release: no safe observed floor"))
         b["moves"].append(here)
         reach = 2.0 * actions.forward_step_m
         ahead = (obs.pose.x + reach * math.cos(obs.pose.yaw), obs.pose.y + reach * math.sin(obs.pose.yaw))
@@ -1696,7 +1713,8 @@ class TargetClosing:
         self.releases += 1
         self.released_step = int(obs.step)
         self.last_release = why
-        p._target_xy = p._target_id = p._target_floor_id = None
+        if not self.target_only:
+            p._target_xy = p._target_id = p._target_floor_id = None
         p._route = p._goal = None
         p.route_memory.clear("target_released")
         self._clear()
