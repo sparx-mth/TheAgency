@@ -1,0 +1,422 @@
+{
+  "arms": [
+    "rpt_room_llm",
+    "rpt"
+  ],
+  "by_category": {
+    "rpt": {
+      "bed": [
+        3,
+        6
+      ],
+      "cabinet": [
+        14,
+        14
+      ],
+      "chair": [
+        19,
+        25
+      ],
+      "chest_of_drawers": [
+        6,
+        8
+      ],
+      "clothes": [
+        0,
+        1
+      ],
+      "counter": [
+        1,
+        4
+      ],
+      "cushion": [
+        17,
+        20
+      ],
+      "fireplace": [
+        3,
+        3
+      ],
+      "gym_equipment": [
+        1,
+        1
+      ],
+      "picture": [
+        16,
+        21
+      ],
+      "plant": [
+        7,
+        7
+      ],
+      "seating": [
+        11,
+        11
+      ],
+      "shower": [
+        3,
+        5
+      ],
+      "sink": [
+        1,
+        2
+      ],
+      "sofa": [
+        2,
+        5
+      ],
+      "stool": [
+        2,
+        3
+      ],
+      "table": [
+        37,
+        37
+      ],
+      "toilet": [
+        0,
+        1
+      ],
+      "towel": [
+        6,
+        6
+      ]
+    },
+    "rpt_room_llm": {
+      "bed": [
+        3,
+        6
+      ],
+      "cabinet": [
+        13,
+        14
+      ],
+      "chair": [
+        17,
+        25
+      ],
+      "chest_of_drawers": [
+        4,
+        8
+      ],
+      "clothes": [
+        0,
+        1
+      ],
+      "counter": [
+        2,
+        4
+      ],
+      "cushion": [
+        20,
+        20
+      ],
+      "fireplace": [
+        3,
+        3
+      ],
+      "gym_equipment": [
+        1,
+        1
+      ],
+      "picture": [
+        16,
+        21
+      ],
+      "plant": [
+        6,
+        7
+      ],
+      "seating": [
+        10,
+        11
+      ],
+      "shower": [
+        3,
+        5
+      ],
+      "sink": [
+        1,
+        2
+      ],
+      "sofa": [
+        2,
+        5
+      ],
+      "stool": [
+        3,
+        3
+      ],
+      "table": [
+        37,
+        37
+      ],
+      "toilet": [
+        1,
+        1
+      ],
+      "towel": [
+        4,
+        6
+      ]
+    }
+  },
+  "by_scene": {
+    "rpt": {
+      "2azQ1b91cZZ": [
+        18,
+        24
+      ],
+      "8194nk5LbLH": [
+        6,
+        6
+      ],
+      "QUCTc6BB5sX": [
+        16,
+        21
+      ],
+      "TbHJrupSAjP": [
+        17,
+        20
+      ],
+      "Z6MFQCViBuw": [
+        17,
+        29
+      ],
+      "oLBMNvg9in8": [
+        20,
+        21
+      ],
+      "pLe4wQe7qrG": [
+        27,
+        27
+      ],
+      "zsNo4HB9uLZ": [
+        28,
+        32
+      ]
+    },
+    "rpt_room_llm": {
+      "2azQ1b91cZZ": [
+        18,
+        24
+      ],
+      "8194nk5LbLH": [
+        6,
+        6
+      ],
+      "QUCTc6BB5sX": [
+        14,
+        21
+      ],
+      "TbHJrupSAjP": [
+        16,
+        20
+      ],
+      "Z6MFQCViBuw": [
+        17,
+        29
+      ],
+      "oLBMNvg9in8": [
+        19,
+        21
+      ],
+      "pLe4wQe7qrG": [
+        27,
+        27
+      ],
+      "zsNo4HB9uLZ": [
+        29,
+        32
+      ]
+    }
+  },
+  "episodes": 180,
+  "paired": {
+    "rpt": {
+      "mcnemar_p": 0.6900379657745361,
+      "spl_ci": [
+        -0.002209442898735272,
+        0.06658417348271496
+      ],
+      "spl_diff": 0.03213567585425082,
+      "sr_ci": [
+        -0.03888888888888889,
+        0.07222222222222222
+      ],
+      "sr_diff": 0.016666666666666666,
+      "to_failure": [
+        "2azQ1b91cZZ/000108",
+        "2azQ1b91cZZ/000118",
+        "2azQ1b91cZZ/000119",
+        "2azQ1b91cZZ/000138",
+        "QUCTc6BB5sX/000054",
+        "QUCTc6BB5sX/000118",
+        "TbHJrupSAjP/000040",
+        "TbHJrupSAjP/000156",
+        "Z6MFQCViBuw/000120",
+        "Z6MFQCViBuw/000123",
+        "zsNo4HB9uLZ/000153"
+      ],
+      "to_success": [
+        "2azQ1b91cZZ/000128",
+        "2azQ1b91cZZ/000157",
+        "2azQ1b91cZZ/000173",
+        "2azQ1b91cZZ/000178",
+        "QUCTc6BB5sX/000035",
+        "QUCTc6BB5sX/000057",
+        "QUCTc6BB5sX/000122",
+        "QUCTc6BB5sX/000163",
+        "TbHJrupSAjP/000162",
+        "TbHJrupSAjP/000163",
+        "TbHJrupSAjP/000190",
+        "Z6MFQCViBuw/000098",
+        "Z6MFQCViBuw/000199",
+        "oLBMNvg9in8/000008"
+      ]
+    }
+  },
+  "paired_tests_vlm_minus_legacy": {
+    "first_agent": "sparx-rpt-vlm-frontiers",
+    "n_episodes": 180,
+    "second_agent": "sparx-rpt-llm-host-sweep",
+    "spl_difference": 0.03213567585425081,
+    "spl_first": 0.37718194166890523,
+    "spl_losses": 61,
+    "spl_p_value": 0.07069293070692931,
+    "spl_second": 0.3450462658146544,
+    "spl_ties": 31,
+    "spl_wins": 88,
+    "success_p_value": 0.6900379657745361,
+    "success_rate_first": 0.8277777777777777,
+    "success_rate_second": 0.8111111111111111
+  },
+  "per_arm": {
+    "rpt": {
+      "dtg_m": 1.4020437530138425,
+      "episodes": 180,
+      "limits": 22,
+      "near_misses_1m": 8,
+      "soft_spl": 0.3995744314473955,
+      "spl": 0.37718194166890523,
+      "sr": 0.8277777777777777,
+      "steps": 184.41666666666666,
+      "stops": 158,
+      "wrong_stops": 9
+    },
+    "rpt_room_llm": {
+      "dtg_m": 1.8424195046277925,
+      "episodes": 180,
+      "limits": 24,
+      "near_misses_1m": 9,
+      "soft_spl": 0.3712736105223264,
+      "spl": 0.3450462658146544,
+      "sr": 0.8111111111111111,
+      "steps": 200.0388888888889,
+      "stops": 156,
+      "wrong_stops": 10
+    }
+  },
+  "sizes": {
+    "rpt": 180,
+    "rpt_room_llm": 180
+  },
+  "verification": {
+    "arms": {
+      "rpt": {
+        "agent_error_episodes": 0,
+        "episodes": 180,
+        "frontier_calls": 4227,
+        "model": "qwen2.5vl:7b",
+        "model_digest": "5ced39dfa4bac325dc183dd1e4febaa1c46b3ea28bce48896c8e69c1e79611cc",
+        "model_residency_after_probe_bytes": 13899328896,
+        "pipeline_failures": 0,
+        "quantization": "Q4_K_M",
+        "room_oracle_queries": 0,
+        "succeeded": 149,
+        "terminations": {
+          "step_limit": 22,
+          "stop": 158
+        },
+        "workers_exited_zero": 8
+      },
+      "rpt_room_llm": {
+        "agent_error_episodes": 0,
+        "episodes": 180,
+        "frontier_calls": 0,
+        "model": "qwen2.5:3b-instruct",
+        "model_digest": "357c53fb659c5076de1d65ccb0b397446227b71a42be9d1603d46168015c9e4b",
+        "model_residency_after_probe_bytes": 2390300672,
+        "pipeline_failures": 0,
+        "quantization": "Q4_K_M",
+        "room_oracle_queries": 601,
+        "succeeded": 146,
+        "terminations": {
+          "step_limit": 24,
+          "stop": 156
+        },
+        "workers_exited_zero": 8
+      }
+    },
+    "identical_selected_starts": 180,
+    "matched_input_file_hashes_by_scene": {
+      "2azQ1b91cZZ": {
+        "2azQ1b91cZZ.glb": "982d3028b6fa82ca63930122065597171c8a8e84b17fe4926f67d9489a321444",
+        "2azQ1b91cZZ.json.gz": "7fa5fbe963fc36e14db59592ca1579b6d0844b69ca2e2452b549c47b2201d780",
+        "2azQ1b91cZZ.navmesh": "7f64fd59beee93adb11772256ebc0894ebb91024cd8504559f7ee904b80b4f49",
+        "val.json.gz": "80e0c6c08220437cb6ba5f05aa1a33a4ffa228e49b5aff4b12ae8c1892891856"
+      },
+      "8194nk5LbLH": {
+        "8194nk5LbLH.glb": "40a745d677562da1697de9a5faaeaa51f39e066ffec0fd2b0772f1a3738d7229",
+        "8194nk5LbLH.json.gz": "30c04c546ddb03b21bc6011a86a57a87496de7035fd155ee0aa1eaffeec2631b",
+        "8194nk5LbLH.navmesh": "888bbdf1f17cab353c06a143f753fec7ce1ce3dfae5919c0fafb4cbbfd5b0f06",
+        "val.json.gz": "80e0c6c08220437cb6ba5f05aa1a33a4ffa228e49b5aff4b12ae8c1892891856"
+      },
+      "QUCTc6BB5sX": {
+        "QUCTc6BB5sX.glb": "8c7b2e79be1632775498206640023831e918d88af80023a00c278694d04ec58f",
+        "QUCTc6BB5sX.json.gz": "c61ed9eabd65dc1444f469ecc529975f2a527e2e002abbf173895c8dcf5d70fd",
+        "QUCTc6BB5sX.navmesh": "5550366a4b7ce8817c3ce4aa69ba21b2e0b30dce7e4075911f57f0528a2395cc",
+        "val.json.gz": "80e0c6c08220437cb6ba5f05aa1a33a4ffa228e49b5aff4b12ae8c1892891856"
+      },
+      "TbHJrupSAjP": {
+        "TbHJrupSAjP.glb": "79de4fd9e64ac82a3183e6ecfd007cb3df28d93f8345fa4d5b3c822981418a38",
+        "TbHJrupSAjP.json.gz": "a2da1ffb981b18f0071862817f8d0d5c0782d7052da5512b76f28b7d9dfe7e6a",
+        "TbHJrupSAjP.navmesh": "e02496af9408e4f04c88ac4bcb6f4cedf40651d14002b10fb34447b1d14332f0",
+        "val.json.gz": "80e0c6c08220437cb6ba5f05aa1a33a4ffa228e49b5aff4b12ae8c1892891856"
+      },
+      "Z6MFQCViBuw": {
+        "Z6MFQCViBuw.glb": "b27e60411c72bff7060f88f6fa1ae15ff8aa871dd4cc0ece675835e123538768",
+        "Z6MFQCViBuw.json.gz": "90118f6e7f86fe17e006af79eb5f70605130f5c92267378f87296cac22b7f1b3",
+        "Z6MFQCViBuw.navmesh": "aef479b2a94c230108e247d3b74e471df9cb7740da108bc7433c2feec0c5abaf",
+        "val.json.gz": "80e0c6c08220437cb6ba5f05aa1a33a4ffa228e49b5aff4b12ae8c1892891856"
+      },
+      "oLBMNvg9in8": {
+        "oLBMNvg9in8.glb": "aa1ff80501ad47ca9505616de05f7d383956154fe2b0b523bae1260cdfca2f23",
+        "oLBMNvg9in8.json.gz": "a96b580a3d924206c07c91f8ebcbdbe4464c3fffd642ad3e2636a31d942e50e9",
+        "oLBMNvg9in8.navmesh": "686e5c40f85d18d1035d130b401816913a4be251e719d8affded82b39a0ce7d5",
+        "val.json.gz": "80e0c6c08220437cb6ba5f05aa1a33a4ffa228e49b5aff4b12ae8c1892891856"
+      },
+      "pLe4wQe7qrG": {
+        "pLe4wQe7qrG.glb": "7faa385a31779ad1c0ef4594507f739840371de75a38b599945521dd26eea3f8",
+        "pLe4wQe7qrG.json.gz": "81ce2b4fc4dacf9e90e8d36c89530039f4b2068fb2b9f2d272c16696384cd029",
+        "pLe4wQe7qrG.navmesh": "f1965baab7a21fcf01d48e20279c04449503526419015750edf501678361d1e3",
+        "val.json.gz": "80e0c6c08220437cb6ba5f05aa1a33a4ffa228e49b5aff4b12ae8c1892891856"
+      },
+      "zsNo4HB9uLZ": {
+        "val.json.gz": "80e0c6c08220437cb6ba5f05aa1a33a4ffa228e49b5aff4b12ae8c1892891856",
+        "zsNo4HB9uLZ.glb": "3611ac3b2a2b76bb15ab2623054929a932aa40c03786b3890cb17a73eccc5689",
+        "zsNo4HB9uLZ.json.gz": "d31fe586cbf94c2611f6928b96cf49441adf42e096b8341f01fde16d51c411c1",
+        "zsNo4HB9uLZ.navmesh": "495495066a57c1eb662d7a3daa3c73f3889460695db148bd991044eef9b06c42"
+      }
+    },
+    "model_seed": 17,
+    "perception": "ground-truth",
+    "protocol_id": "mp3d-objectnav-v1-val/2",
+    "published_ids_goals_and_start_poses_sha256": "0f652d3330aee5b1338cace0d26c98e16d795a17654548fecc07f6d5eb0631e7",
+    "selection": "sparx_agency/tasks/planning/objnav_benchmark_runtime/mp3d/sets/single_storey_flat_v1.json",
+    "selection_sha256": "4ea221b19f674295d81390f8f9668a4e32a08e2c07e2de9c43ec97879af955a3",
+    "simulator_seed": 17,
+    "source_commit": "65a58747d23cbba2279ec53c54f098708e66544d",
+    "source_sha256": "29c65ee9b2431a114cb2e570ed244d01ad95f65fb9076660f3a8c6875f01975b"
+  }
+}

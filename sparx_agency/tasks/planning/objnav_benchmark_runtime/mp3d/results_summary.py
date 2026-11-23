@@ -37,7 +37,8 @@ from typing import Dict, List, Optional
 
 from sparx_agency.tasks.planning.objnav_benchmark.aggregate import summarise
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import read_episode_rows
-from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import model_provenance, model_report_rows
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (
+    model_provenance, model_report_rows, model_report_title)
 
 DEFAULT_RESULTS_ROOT = Path(__file__).resolve().parent / "results"
 EPISODE_COLUMNS = ("episode_id", "scene_id", "target_category", "success", "spl", "soft_spl", "path_length_m",
@@ -142,8 +143,7 @@ def write(root: Path, out: Path, title: Optional[str] = None, started_utc: Optio
     summary = summarise(records)
     prov = provenance(root, started_utc, finished_utc)
     campaign = _json(root / "campaign_summary.json")
-    title = title or "MP3D %s: %s (oracle) / %s (labels), %s perception" % (
-        prov["protocol_id"] or "", prov["llm"]["oracle"], prov["llm"]["labels"], prov["perception"])
+    title = title or model_report_title("MP3D", prov)
     out.mkdir(parents=True, exist_ok=True)
     (out / "summary.md").write_text(markdown(title, prov, summary, campaign))
     data = {"title": title, "provenance": prov, "campaign": {k: v for k, v in (campaign or {}).items() if k != "by_scene"},

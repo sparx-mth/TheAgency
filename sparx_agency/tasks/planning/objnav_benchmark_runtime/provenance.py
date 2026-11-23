@@ -32,6 +32,16 @@ def model_provenance(method):
     return {"pipeline_variant": variant, "llm": llm, "node_oracle": {"prompt": oracle.get("prompt"), "model": oracle.get("model")}}
 
 
+def model_report_title(dataset, prov):
+    """Name the model roles present in this campaign's frozen provenance."""
+    llm = prov["llm"]
+    if "visual" in llm:
+        roles = "%s (frontier VLM)" % llm["visual"]
+    else:
+        roles = "%s (oracle) / %s (labels)" % (llm["oracle"], llm["labels"])
+    return "%s %s: %s, %s perception" % (dataset, prov["protocol_id"] or "", roles, prov["perception"])
+
+
 def model_report_rows(prov):
     result = ["| pipeline variant | `%s` |" % prov["pipeline_variant"]]
     llm = prov["llm"]

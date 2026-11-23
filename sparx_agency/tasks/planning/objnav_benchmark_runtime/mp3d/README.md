@@ -332,6 +332,8 @@ them on for a comparison, nothing else does.
   (`hm3d/episode_levels.py` over MP3D val); the `.meta.json` beside it holds the
   rules and the per-scene / per-category counts. Change it only on purpose:
   every comparison made on it depends on its being the same list.
+  The [GT-only frontier VLM vs. room LLM comparison](results/gt_rpt_pair_single_storey_v1_seed17/summary.md)
+  reports all 180 matched starts, per-episode metrics, and paired uncertainty.
 * **`run_single_storey.sh <name>`** rsyncs the tracked source into
   `~/GIT/TheAgency_snapshots/<name>/` once and runs the launcher from there (a
   scene child imports the repository at its own start, so a campaign that runs
