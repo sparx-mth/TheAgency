@@ -32,6 +32,7 @@ class FrontierSearch:
         self.calls = 0
         self.inventory = None
         self.inventory_step = -1
+        self._spun_route = None
 
     def refresh(self, obs, world, *, on_floor):
         """One extraction from observed occupancy. No room labels or room membership."""
@@ -43,6 +44,17 @@ class FrontierSearch:
                 p.sweep.settings.ranking, preferred_cost=p.preferred_cost(world), frontier_world=p.sight.overlay(world))
         self.observe(obs, world, self.inventory.clusters if self.inventory is not None else ())
 
+    def _spin_at_route_end(self, obs):
+        """Turn in place once when the route to a frontier is walked to its goal, even if the frontier is gone by then."""
+        p, route = self.policy, self.policy.route_memory
+        turns = p.settings.arrival_spin_turns
+        if not turns or p.warmup_actions < p.warmup_turns or not str(route.kind).startswith("frontier/"):
+            return
+        key = (route.kind, tuple(float(c) for c in route.goal))
+        if key != self._spun_route and route.arrived(obs):
+            self._spun_route = key
+            p.start_rotation(turns)
+
     def observe(self, obs, world, clusters):
         p = self.policy
         nodes = frontier_nodes(world, clusters, self.registry, p.mapping.floor_id)
@@ -50,16 +62,12 @@ class FrontierSearch:
         self.ledger.observe(obs.step, self.nodes)
         self.blocked_cells = {cell for n in nodes if self.ledger.nodes[n.node_id].state == BLOCKED for cell in n.goal_cells}
         arrival = p.converter_params.goal_tolerance_m + world.resolution
-        rotating = p.warmup_actions < p.warmup_turns
-        spin_turns = 0 if rotating else p.settings.arrival_spin_turns
         for node in nodes:
             if math.dist((obs.pose.x, obs.pose.y), node.xy) <= arrival:
                 if self.ledger.nodes[node.node_id].visited_step is None:
                     p._visited_frontiers.append(node.xy)  # the geometric fallback shares the visit
-                    if spin_turns:
-                        p.start_rotation(spin_turns)
-                        spin_turns = 0
                 self.ledger.mark_visited(node.node_id, obs.step)
+        self._spin_at_route_end(obs)
 
         pending = [self.nodes[i] for i in self.ledger.pending()]
         if not pending or p.fallback.service_unavailable(VLM, obs.step):
