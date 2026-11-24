@@ -45,6 +45,57 @@ the agent has observed (`standing_points` in the run configuration; until
 `target_navmesh_projection`).
 This is an experimental multi-story algorithm, **not a claim of solved navigation**.
 
+## Full HM3D and MP3D validation on one RTX 4090
+
+These launchers run the standard visual `rpt` agent with YOLO-World, lean episode records and no video. They use
+the published splits without sampling or repeating episodes:
+
+| Launcher | Split | Worker ceiling | Budget per worker (VRAM / host RAM) |
+|---|---|---|---|
+| `hm3d/run_4090.sh` | HM3D v1 val: 2,000 episodes, 20 scenes | 7 scenes | 768 MiB / 4 GiB |
+| `mp3d/run_4090.sh` | MP3D v1 val: 2,195 episodes, 11 scenes | 4 shards of up to 20 episodes | 1,400 MiB / 6 GiB |
+
+**Preview anywhere.** No arguments or `--dry-run` only prints the settings and command; it does not need a GPU,
+data, weights or Habitat. The underlying `run_benchmark.sh --preflight` is **not** a dry run: it starts services
+and sends a real image to the model.
+
+```bash
+# From the repository root
+R=sparx_agency/tasks/planning/objnav_benchmark_runtime
+"$R/hm3d/run_4090.sh" --dry-run
+"$R/mp3d/run_4090.sh" --dry-run
+```
+
+**On the Linux PC only:** install the [HM3D v1](hm3d/README.md#12-datasets) and [MP3D](mp3d/README.md#12-datasets)
+episodes and licensed scenes, Habitat-Sim 0.2.4, a **CUDA-enabled** YOLO detector environment and a vision-capable
+native Ollama on `PATH`. The defaults are `DATA=~/datasets`, `MODELS=~/models/objnav` (YOLO weights, CLIP and
+the `ollama/` store), `HAB_PY=~/miniconda3/envs/objnav-habitat/bin/python` and `DETECT_PY=~/.venvs/objnav-detector/bin/python`.
+Export the paths that differ; `HM3D_SCENES_DIR` and `MP3D_SCENES_DIR` can point at separate `scene_datasets/` roots.
+Leave the card and the service ports free. Each run starts its own servers; a missing Ollama model may be pulled.
+
+```bash
+"$R/hm3d/run_4090.sh" --run && "$R/mp3d/run_4090.sh" --run  # sequential, not concurrent
+```
+
+Both share **one** `qwen2.5vl:7b` on loopback port **11450** (`--llm-port` to change), with **2 request slots**,
+a 4,096-token context, Q8 KV cache and **256-token prefill batches**. YOLO uses port **18092** (HM3D) or **18093**
+(MP3D); no worker loads a model replica. The 14 GiB VLM allowance is based on an earlier
+[12.9 GiB residency observation](mp3d/results/gt_rpt_pair_single_storey_v1_seed17/summary.md), **not a peak guarantee**.
+The launch check subtracts that allowance, 2 GiB for YOLO and a 2 GiB VRAM reserve, leaves 16 GiB of available
+host RAM for services and the OS, and reduces the worker ceiling to fit. MP3D also gates new shards at 88% VRAM.
+
+**Tune for throughput, not memory occupancy.** In a second terminal, use `nvidia-smi dmon -s um` and `free -h`;
+compare sustained GPU compute and episodes/hour after warm-up. Around 90% compute is a target, not a measured result:
+CPU scene work or serialized inference can be limiting. If compute is low **and** memory is available, raise
+`--jobs` one at a time. If the admitted count does not rise, check `gpu_plan.json`: revise `LLM_VRAM_MIB` or
+`HABITAT_VRAM_MIB` only from measured peaks on the PC, keeping headroom. If memory is tight, lower `--jobs` first,
+then try `--slots 1 --batch 128`. More than two slots or a batch above 256 needs an explicit `LLM_VRAM_MIB`.
+Use a fresh `--output` for changed settings.
+
+Results go to `runs/{hm3d,mp3d}_v1_val_4090/` by default (`RUNS_ROOT` or `--output` to relocate). Rerun the **same**
+command to resume. See `run.log` for progress, `workstation_4090.json` for the admitted worker count and server
+settings, `gpu_plan.json` for placement, and `campaign_summary.json` for the episode count, `complete`, SR and SPL.
+
 ## The agent is given no scene geometry
 Since 2026-11-15 nothing of the simulator's scene geometry crosses the agent
 interface. The navmesh is used on THIS side only -- the simulator's own

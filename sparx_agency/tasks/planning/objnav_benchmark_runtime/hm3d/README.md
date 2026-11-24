@@ -32,6 +32,9 @@ Three processes cooperate, each in its own environment:
 
 ## One command (the launcher)
 
+For **2,000 HM3D v1 val episodes on a 24 GiB RTX 4090 / 64 GiB PC**, use
+[`run_4090.sh`](run_4090.sh). It previews by default; see the [workstation run instructions](../README.md#full-hm3d-and-mp3d-validation-on-one-rtx-4090).
+
 `hm3d/run_benchmark.sh` is the one-click path -- the same shape as `gibson/run_benchmark.sh`, and the same
 service code (`../benchmark_services.sh`: the GPU plan, Ollama, the YOLO-World detector started with the HM3D
 label table's vocabulary, the optional segmenter, FFmpeg, and their teardown), so the method's services are
@@ -890,4 +893,3 @@ the exploration fallback, the frontier sweep, camera control),
 [multi-story protocol and ground-truth stairs](../gibson/MULTISTORY.md),
 [detector service](../../../mapping/scene_graph/serve/README.md), and
 `LESSONS.md` at the repo root.
-

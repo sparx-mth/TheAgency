@@ -22,6 +22,9 @@ Nothing here came from an MP3D score.
 
 ## One command (the launcher)
 
+For **2,195 MP3D v1 val episodes on a 24 GiB RTX 4090 / 64 GiB PC**, use
+[`run_4090.sh`](run_4090.sh). It previews by default; see the [workstation run instructions](../README.md#full-hm3d-and-mp3d-validation-on-one-rtx-4090).
+
 ```bash
 cd ~/GIT/TheAgency
 sparx_agency/tasks/planning/objnav_benchmark_runtime/mp3d/run_benchmark.sh            # the full published val split
