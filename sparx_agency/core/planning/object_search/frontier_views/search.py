@@ -50,7 +50,8 @@ class FrontierSearch:
         self.ledger.observe(obs.step, self.nodes)
         self.blocked_cells = {cell for n in nodes if self.ledger.nodes[n.node_id].state == BLOCKED for cell in n.goal_cells}
         arrival = p.converter_params.goal_tolerance_m + world.resolution
-        spin_turns = p.settings.arrival_spin_turns
+        rotating = p.warmup_actions < p.warmup_turns
+        spin_turns = 0 if rotating else p.settings.arrival_spin_turns
         for node in nodes:
             if math.dist((obs.pose.x, obs.pose.y), node.xy) <= arrival:
                 if self.ledger.nodes[node.node_id].visited_step is None:

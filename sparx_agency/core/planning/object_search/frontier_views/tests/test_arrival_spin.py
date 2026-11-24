@@ -40,6 +40,14 @@ def test_a_new_floor_still_gets_the_full_warmup(monkeypatch):
     assert command.info["kind"] == "warmup" and command.info["warmup_budget"] == p.rotation_turns()
 
 
+def test_standing_on_a_node_during_the_opening_warmup_leaves_that_warmup_whole(monkeypatch):
+    p, ep, _ = two_gaps(monkeypatch, SCORES, arrival_spin_turns=3, warmed_up=False)
+    p.plan(frame(ep, 0, depth=float("nan")))
+    on_a_node = pose(*next(iter(p.frontiers.nodes.values())).xy)
+    command = p.plan(frame(ep, 1, depth=float("nan"), pose=on_a_node))
+    assert command.info["kind"] == "warmup" and command.info["warmup_budget"] == p.rotation_turns()
+
+
 @pytest.mark.parametrize("bad", [-1, 1.5, True, "3"])
 def test_the_spin_length_is_a_non_negative_integer(bad):
     from sparx_agency.core.planning.object_search.settings import RPTSettings
