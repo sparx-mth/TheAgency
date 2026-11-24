@@ -50,10 +50,14 @@ class FrontierSearch:
         self.ledger.observe(obs.step, self.nodes)
         self.blocked_cells = {cell for n in nodes if self.ledger.nodes[n.node_id].state == BLOCKED for cell in n.goal_cells}
         arrival = p.converter_params.goal_tolerance_m + world.resolution
+        spin_turns = p.settings.arrival_spin_turns
         for node in nodes:
             if math.dist((obs.pose.x, obs.pose.y), node.xy) <= arrival:
                 if self.ledger.nodes[node.node_id].visited_step is None:
                     p._visited_frontiers.append(node.xy)  # the geometric fallback shares the visit
+                    if spin_turns:
+                        p.start_rotation(spin_turns)
+                        spin_turns = 0
                 self.ledger.mark_visited(node.node_id, obs.step)
 
         pending = [self.nodes[i] for i in self.ledger.pending()]

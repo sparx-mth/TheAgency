@@ -51,6 +51,9 @@ class RPTSettings:
             79-degree camera (``RPTSearchPolicy.rotation_turns``) -- never
             more than this; the position is then recorded as a completed
             scan, so the spawn room is finished before the search begins.
+        arrival_spin_turns: In-place turns taken the first time the agent
+            stands on a frontier node, so the frames after it show what
+            lies beyond. 0 (the default) takes none.
         doorway_peek: The one-shot doorway inspections. OFF by default since
             2026-10-04: under the scan visit a peek -- approach, a half
             turn from the threshold, the walk back -- costs as much as a
@@ -240,6 +243,7 @@ class RPTSettings:
     sticky_bump_actions: int = 120
     local_exploration: str = "frontier"
     warmup_steps: int = 12
+    arrival_spin_turns: int = 0
     allow_stair_traversal: bool = False
     floor_plane_bound_m: float = 0.5
     step_down_m: float = 0.30
@@ -290,6 +294,8 @@ class RPTSettings:
                     "target_memory_steps", "max_rooms", "warmup_steps", "goal_bump_retire", "goal_bump_window"):
             if type(getattr(self, key)) is not int or getattr(self, key) <= 0:
                 raise ValueError("%s must be a positive integer" % key)
+        if type(self.arrival_spin_turns) is not int or self.arrival_spin_turns < 0:
+            raise ValueError("arrival_spin_turns must be a non-negative integer")
         if type(self.sticky_bump_actions) is not int or self.sticky_bump_actions < 0:
             raise ValueError("sticky_bump_actions must be a non-negative integer (0 keeps a bar for the episode)")
         if (isinstance(self.goal_bump_match_m, bool) or not math.isfinite(self.goal_bump_match_m)

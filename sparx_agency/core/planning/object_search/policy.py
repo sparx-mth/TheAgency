@@ -249,12 +249,20 @@ class _ObservedSearchPolicy:
         self.glances = GlanceScheduler(self, self.glance_settings)
         # One look-around is as many turns as the camera's field of view needs to see the
         # whole circle (ten at 30 degrees with a 79-degree field), bounded by ``warmup_steps``.
-        self.warmup_turns = min(s.warmup_steps, self.rotation_turns())
+        self.warmup_turns = self.full_rotation_turns
         self.warmup_actions = 0
         self._warmup_pending = True       # the warm-up rotation's scan has not been recorded yet
         self._action_owner = "search"
         self._notified_step = self._decision_step = -1
         self._decision_command = None
+
+    @property
+    def full_rotation_turns(self):
+        return min(self.settings.warmup_steps, self.rotation_turns())
+
+    def start_rotation(self, turns):
+        self.warmup_turns = turns
+        self.warmup_actions = 0
 
     def rotation_turns(self):
         """In-place turns one full look-around takes: what the camera's field of view needs to cover the circle.
@@ -741,7 +749,7 @@ class RPTSearchPolicy(_ObservedSearchPolicy):
     def _change_floor(self, observation):
         floor = self.mapping.floor_id
         if floor not in self._retired_by_floor:
-            self.warmup_actions = 0
+            self.start_rotation(self.full_rotation_turns)
         self._visited_frontiers = self._retired_by_floor.setdefault(floor, [])
         self._goal_bumps = {}
         self._floor_time = 0.0
