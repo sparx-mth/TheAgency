@@ -1,0 +1,106 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{algorithm}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{algpseudocode}
+
+\begin{document}
+
+\begin{algorithm}[t]
+\caption{VLM-Guided Object Search}
+\begin{algorithmic}[1]
+\Require target category $c^*$; RGB-D observations $(I_t, D_t)$ and pose $x_t$; step budget $T$
+\Ensure \textbf{Found} at the target, or \textbf{Fail} when the budget is spent
+\State \textbf{State:} frontier clusters $\mathcal F$; cluster scores $s(f)$; path $\tau$; remaining scan turns $n$
+\State $\tau \gets \emptyset$
+\State $n \gets 10$
+\While{$t < T$}
+    \If{the target $c^*$ is detected in $I_t$} \Comment{checked on every frame}
+        \State \textsc{TargetClosing}()
+        \State \Return \textbf{Found} \Comment{A1}
+    \EndIf
+    \State $\mathcal M \gets \textsc{UpdateMap}(D_t,x_t)$
+    \State $\mathcal F \gets \textsc{ClusterFrontiers}(\mathcal M,x_t)$ \Comment{each new observation; keep scores by cluster ID}
+    \If{$n > 0$} \Comment{$360^\circ$ scan: $10 \times 30^\circ + 79^\circ = 379^\circ \geq 360^\circ$}
+        \State \textsc{TurnInPlace}($30^\circ$)
+        \State $n \gets n - 1$
+        \State \textbf{continue}
+    \EndIf
+    \ForAll{unscored, unblocked clusters $f \in \mathcal F$}
+        \State $\mathcal J \gets \textsc{SelectViews}(f)$ \Comment{up to three views of $f$}
+        \State \textbf{if} $\mathcal J \ne \emptyset$ \textbf{then} $s(f) \gets \textsc{VLM}(c^*,\mathcal J)$
+    \EndFor
+    \If{$\tau = \emptyset$}
+        \State $d \gets \textsc{Dijkstra}(x_t,F)$ \Comment{$F$: eligible, scored, unvisited clusters in $\mathcal F$}
+        \State $\pi \gets \textsc{RPT}^*(F,s,d)$
+        \State $\tau \gets \textsc{A}^*(x_t,\pi_1)$
+    \EndIf
+    \State \textsc{Navigate}($\tau$)
+    \State \textbf{if} $\textsc{Arrived}(x_t,\tau)$ \textbf{then} $\tau \gets \emptyset$
+\EndWhile
+\State \Return \textbf{Fail}
+\end{algorithmic}
+\end{algorithm}
+
+\noindent\textbf{The $360^\circ$ scan.}
+During warmup the agent looks in every direction, but not every frontier has a usable view.
+Each turn is $30^\circ$ and the camera sees $79^\circ$ horizontally.
+Ten turns rotate the camera by $300^\circ$, and the view extends $39.5^\circ$ beyond the first and the last heading, so the scan covers $300^\circ + 79^\circ = 379^\circ \geq 360^\circ$.
+Nine turns would cover only $270^\circ + 79^\circ = 349^\circ$, so ten is the smallest number that sees every bearing.
+
+\medskip
+\noindent\textbf{Assumptions.}
+A1: the high-level loop assumes successful target closing; the live agent resumes search if verification fails.
+A2: one valid reply scores the cluster ID for the episode. No usable view or a failed request leaves it pending; a service failure pauses scoring.
+A3: reaching a frontier marks it visited. The next search decision chooses among the remaining clusters without a $360^\circ$ scan. A cluster still present at least 12 actions after its first visit is blocked.
+
+\begin{algorithm}[H]
+\caption{\textsc{SelectViews}: Representative Frames for One Frontier Cluster}
+\begin{algorithmic}[1]
+\Require frontier cluster $f$; its set of frontier cells $C$; observed frames $\mathcal H$ with their poses; current map $\mathcal M$
+\Ensure up to three views of $f$, each boxed around its visible cells
+\Statex \textbf{Notation:} $q_{jc}$ is the visibility quality of frontier cell $c$ in frame $j$.
+\State $V\gets\textsc{FilterFrames}(\mathcal H,f)$
+\State $q_{jc}\gets 0\quad(j\in V,c\in C)$
+\ForAll{$(j,c)\in V\times C$ with $\textsc{Visible}(j,c,\mathcal M)$}
+    \State $h\gets\textsc{VisibleBandFraction}(j,c)$
+    \State $r\gets\textsc{GroundDistance}(j,c)$
+    \State $w\gets 1$ \textbf{if} $\textsc{SeesThrough}(j,c,\mathcal M)$ \textbf{else} $0.5$
+    \State $q_{jc}\gets w\,h\min(1,3/r)$
+\EndFor
+\State $\mathcal J\gets\emptyset$
+\State $b_c\gets 0\quad(c\in C)$
+\While{$|\mathcal J|<3$ \textbf{and} $V\setminus\mathcal J\ne\emptyset$}
+    \State $g_j\gets\textsc{MarginalGain}(q_j,b)$ for each $j\in V\setminus\mathcal J$
+    \State $j^*\gets\textsc{BestFrame}(V\setminus\mathcal J,g)$
+    \State \textbf{if not} $\textsc{SufficientGain}(j^*,g_{j^*},\mathcal J)$ \textbf{then break}
+    \State $\mathcal J\gets\mathcal J\cup\{j^*\}$
+    \State $b_c\gets\max(b_c,q_{j^*c})\quad(c\in C)$
+\EndWhile
+\State \Return $\textsc{BoxViews}(\mathcal J,f)$
+\end{algorithmic}
+\end{algorithm}
+
+\noindent\textbf{Notation.}
+\begin{description}
+\item[$V$, $\mathcal J$] $V$ is the set of candidate frames. $\mathcal J$ contains up to three selected frames, in the order chosen; $V\setminus\mathcal J$ contains those still available.
+\item[$h$, $r$, $w$] For frame $j$ and frontier cell $c$, $h$ is the visible fraction of the cell's height band, $r$ is its ground distance from the camera in metres, and $w$ is the ray weight ($1$ for a view through the frontier, $0.5$ for a view of the boundary only).
+\item[$q_{jc}$, $q_j$] $q_{jc}\in[0,1]$ is the visibility quality of cell $c$ in frame $j$, not a target probability. $q_j$ collects these scores over all cells of the cluster.
+\item[$b_c$, $b$] $b_c$ is the highest visibility quality for cell $c$ among frames currently in $\mathcal J$, or zero if none is selected. $b$ collects these best scores over all cluster cells.
+\item[$g_j$, $g$, $j^*$] $g_j$ is the marginal coverage gain from adding frame $j$; $g$ collects the gains of the remaining frames. $j^*$ is the frame picked for the next acceptance check.
+\end{description}
+
+\noindent\textbf{Helper functions.}
+\begin{description}
+\item[\textsc{FilterFrames}] --- Keep frames from the cluster's floor, retaining the latest frame at each distinct capture pose.
+\item[\textsc{Visible}] --- Check that the cell is in range, enough of its height band is in the image, and the current map gives a clear line of sight.
+\item[\textsc{VisibleBandFraction}] --- Return the fraction of the cell's vertical height band inside the image.
+\item[\textsc{GroundDistance}] --- Measure the horizontal distance from the frame's camera pose to the cell centre, in metres.
+\item[\textsc{SeesThrough}] --- Test whether the direct ray from the camera through the cell continues into unsettled unknown space immediately beyond it.
+\item[\textsc{MarginalGain}] --- Average the improvement over all cluster cells: a frame earns credit only where $q_{jc}>b_c$.
+\item[\textsc{BestFrame}] --- Pick the frame with the largest gain. Break ties by more cells seen through, then better centring of the visible cells, then the latest frame.
+\item[\textsc{SufficientGain}] --- Require enough visible cells and mean quality for the first frame. Later frames must add enough coverage both in absolute terms and relative to current coverage.
+\item[\textsc{BoxViews}] --- Return the selected frames in order, each with a box around the visible cells of cluster $f$.
+\end{description}
+
+\end{document}
