@@ -1,0 +1,47 @@
+{
+  "samples": 3295,
+  "first_utc": "2026-11-24T15:52:31Z",
+  "last_utc": "2026-11-25T05:38:12Z",
+  "span_h": 13.76,
+  "gpu_util_pct": {
+    "mean": 20.4,
+    "median": 1.0,
+    "peak": 100.0
+  },
+  "vram_used_mib": {
+    "mean": 16765.1,
+    "median": 16998.0,
+    "peak": 17930.0
+  },
+  "cpu_pct": {
+    "mean": 19.9,
+    "median": 20.1,
+    "peak": 31.1
+  },
+  "ram_used_mib": {
+    "mean": 20600.8,
+    "median": 20715.0,
+    "peak": 22120.0
+  },
+  "load1": {
+    "mean": 4.9,
+    "median": 4.8,
+    "peak": 10.5
+  },
+  "workers": {
+    "mean": 3.9,
+    "median": 4.0,
+    "peak": 5.0
+  },
+  "vram_pct": {
+    "mean": 68.3,
+    "median": 69.2,
+    "peak": 73.0
+  },
+  "ram_pct": {
+    "mean": 32.2,
+    "median": 32.4,
+    "peak": 34.6
+  },
+  "gpu_busy_share_above_80": 0.093
+}

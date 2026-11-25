@@ -5,6 +5,12 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Added (2026-11-25, the full MP3D v1 val split on the RTX 4090 profile, VLM frontier search under ground-truth perception)
+- `mp3d/results/mp3d_v1_val_4090/`: 2,195 of 2,195 episodes, `complete: true`, SR 0.632 / SPL 0.296 / DTG 4.08 m
+  with `qwen2.5vl:7b`; an upper bound under ideal perception, not a publishable result. `analysis.md` reads the
+  failures (388 cross-storey episodes at 0 %, same-storey SR 0.768, 88 failed STOPs of which 57 within 1 m) and the
+  compute (GPU 20 % mean against the profile's 90 % target, four simulator workers the limit).
+
 ### Fixed (2026-11-25, a recorded run's kinematic check never saw the step filter's placement)
 - `RecordingEnv.placed_pose` forwards the environment's checker-only hook, so a recorded run's turns and steps are
   judged from where habitat-sim's step filter started them, as unrecorded runs already were. It ended

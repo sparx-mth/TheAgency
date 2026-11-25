@@ -1,0 +1,347 @@
+diff --git a/sparx_agency/tasks/planning/objnav_benchmark_runtime/README.md b/sparx_agency/tasks/planning/objnav_benchmark_runtime/README.md
+index 9e562e8e..4e80405d 100644
+--- a/sparx_agency/tasks/planning/objnav_benchmark_runtime/README.md
++++ b/sparx_agency/tasks/planning/objnav_benchmark_runtime/README.md
+@@ -47,7 +47,7 @@ This is an experimental multi-story algorithm, **not a claim of solved navigatio
+ 
+ ## Full HM3D and MP3D validation on one RTX 4090
+ 
+-These launchers run the standard visual `rpt` agent with YOLO-World, lean episode records and no video. They use
++By default these launchers run the visual `rpt` agent with YOLO-World, lean episode records and no video. They use
+ the published splits without sampling or repeating episodes:
+ 
+ | Launcher | Split | Worker ceiling | Budget per worker (VRAM / host RAM) |
+@@ -96,6 +96,20 @@ Results go to `runs/{hm3d,mp3d}_v1_val_4090/` by default (`RUNS_ROOT` or `--outp
+ command to resume. See `run.log` for progress, `workstation_4090.json` for the admitted worker count and server
+ settings, `gpu_plan.json` for placement, and `campaign_summary.json` for the episode count, `complete`, SR and SPL.
+ 
++**GT-only validation with detailed records:** preview `mp3d/run_4090.sh --gt-detailed --dry-run`.
++On the dedicated workstation, start a fresh campaign with `mp3d/run_4090.sh --gt-detailed --run`.
++The launcher checks only the VLM port and budgets no detector. The simulator supplies ground-truth boxes and masks;
++these scores are an upper bound under ideal perception, not results under learned perception. A bare `--run`
++on the same output resumes its recorded mode. It does not convert an existing YOLO campaign to GT.
++
++Under `runs/mp3d_v1_val_4090/`, each `<scene>/shard_<n>/episodes.jsonl` holds the full policy report, including
++frontier node probabilities, selected frame names and fallback diagnostics. Each shard's `recordings/` holds
++per-episode steps, trajectories and metrics without video. The sibling `runs/mp3d_v1_val_4090_vlm_answers/`
++stores episode-scoped VLM prompts, image digests and replies outside the scene aggregator. `utilization.csv`
++in the campaign root appends GPU compute, VRAM, host usage and worker counts every 15 seconds. Inspect
++`campaign_heartbeat.jsonl` and the shard console logs for stalled workers; neither a dry run nor a profile
++file is evidence of completed episodes.
++
+ ## The agent is given no scene geometry
+ Since 2026-11-15 nothing of the simulator's scene geometry crosses the agent
+ interface. The navmesh is used on THIS side only -- the simulator's own
+diff --git a/sparx_agency/tasks/planning/objnav_benchmark_runtime/benchmark_services.sh b/sparx_agency/tasks/planning/objnav_benchmark_runtime/benchmark_services.sh
+index 85667816..f6152483 100644
+--- a/sparx_agency/tasks/planning/objnav_benchmark_runtime/benchmark_services.sh
++++ b/sparx_agency/tasks/planning/objnav_benchmark_runtime/benchmark_services.sh
+@@ -146,16 +146,17 @@ sys.exit(not any(m.get("name") == sys.argv[1] and m.get("size_vram", 0) > 0
+     if [[ -n "$GPU_PLAN_REPLAY" ]]; then
+       [[ -f "$GPU_PLAN_REPLAY" ]] || die "GPU_PLAN_REPLAY names no recorded plan at $GPU_PLAN_REPLAY"
+       PLAN_ENV="$("$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan \
+-                   --replay "$GPU_PLAN_REPLAY" --format env --write "$SERVICE_DIR/gpu_plan.json")" \
++                   --replay "$GPU_PLAN_REPLAY" --format assignments --write "$SERVICE_DIR/gpu_plan.json")" \
+         || die "gpu_plan.py could not replay $GPU_PLAN_REPLAY"
+       say "GPU plan replayed from $GPU_PLAN_REPLAY (a resume keeps the devices the run was frozen with)" | tee -a "$LOG"
+     else
+       PLAN_ENV="$("$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan \
+-                   --gpu-device "$GPU_DEVICE" --format env --write "$SERVICE_DIR/gpu_plan.json")" \
++                   --gpu-device "$GPU_DEVICE" --format assignments --write "$SERVICE_DIR/gpu_plan.json")" \
+         || die "gpu_plan.py could not place the processes (nvidia-smi? Ollama manifests under $OLLAMA_MODELS_DIR? set LLM_VRAM_MIB)"
+     fi
+     OPERATOR_SHARED_GPU="$ALLOW_SHARED_GPU"
+-    eval "$PLAN_ENV"                      # sets ALLOW_SHARED_GPU=1 when more than one process (or a desktop) holds the card
++    local assignment
++    while IFS= read -r assignment; do export "$assignment"; done <<< "$PLAN_ENV"
+     [[ "$OPERATOR_SHARED_GPU" == 1 ]] && ALLOW_SHARED_GPU=1
+     if [[ "$LLM_SERVER_UP" == 1 ]]; then
+       export LLM_NUM_GPU=""
+@@ -198,9 +199,14 @@ PY
+   esac
+ 
+   # -- services ----------------------------------------------------------------------------------
+-  STARTED_OLLAMA=0 DETECTOR_PID="" SEGMENTER_PID="" OLLAMA_PID=""
++  STARTED_OLLAMA=0 DETECTOR_PID="" SEGMENTER_PID="" OLLAMA_PID="" RESOURCE_MONITOR_PID=""
+   trap objnav_services_cleanup EXIT
+   trap 'exit 130' INT TERM
++  if [[ "${OBJNAV_RESOURCE_MONITOR:-0}" == 1 ]]; then
++    "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.resource_monitor record \
++      "$SERVICE_DIR/utilization.csv" --interval 15 --gpu-device "$GPU_DEVICE" >> "$SERVICE_DIR/resource_monitor.log" 2>&1 &
++    RESOURCE_MONITOR_PID=$!
++  fi
+ 
+   if [[ "$AGENT" == falcon-yolo ]]; then
+     say "LLM: none (--agent falcon-yolo: goal-free FALCON + YOLO + the same closing; Ollama is neither started nor checked)" | tee -a "$LOG"
+@@ -317,6 +323,13 @@ objnav_services_cleanup() {
+   trap - EXIT
+   # The launcher's own processes first (a parallel run's shards): they must not outlive the detector they call.
+   if declare -F objnav_launcher_cleanup > /dev/null; then objnav_launcher_cleanup || true; fi
++  if [[ -n "$RESOURCE_MONITOR_PID" ]]; then
++    if ! kill -TERM "$RESOURCE_MONITOR_PID" 2>/dev/null; then
++      say "ERROR: utilization monitor exited early; see $SERVICE_DIR/resource_monitor.log" >&2
++      if [[ "$code" == 0 ]]; then code=1; fi
++    fi
++    wait "$RESOURCE_MONITOR_PID" 2>/dev/null || true
++  fi
+   if [[ -n "$DETECTOR_PID" ]]; then kill -TERM "$DETECTOR_PID" 2>/dev/null || true; wait "$DETECTOR_PID" 2>/dev/null || true; fi
+   if [[ -n "$SEGMENTER_PID" ]]; then kill -TERM "$SEGMENTER_PID" 2>/dev/null || true; wait "$SEGMENTER_PID" 2>/dev/null || true; fi
+   if [[ "$STARTED_OLLAMA" == 1 ]]; then
+diff --git a/sparx_agency/tasks/planning/objnav_benchmark_runtime/gpu_plan.py b/sparx_agency/tasks/planning/objnav_benchmark_runtime/gpu_plan.py
+index e36b9783..1d17b70b 100644
+--- a/sparx_agency/tasks/planning/objnav_benchmark_runtime/gpu_plan.py
++++ b/sparx_agency/tasks/planning/objnav_benchmark_runtime/gpu_plan.py
+@@ -50,6 +50,7 @@ from dataclasses import asdict, dataclass, field
+ import json
+ import os
+ from pathlib import Path
++import re
+ import subprocess
+ from typing import Callable, Dict, List, Optional, Sequence, Tuple
+ 
+@@ -77,6 +78,12 @@ PARTIAL_FRACTION = 0.5           # an LLM whose estimate fits at least this far
+ #: What an operator may pin a component to (``GPU_PLAN_<COMPONENT>``); ``auto`` leaves it to the free VRAM.
+ PINS = ("auto", "gpu", "cpu")
+ COMPONENT_NAMES = ("llm", "yolo", "habitat")
++PLAN_VARIABLES = {
++    "OBJNAV_LLM_DEVICE": "cpu|gpu|gpu-partial", "OBJNAV_YOLO_DEVICE": "cpu|gpu", "OBJNAV_HABITAT_DEVICE": "cpu|gpu",
++    "OLLAMA_CUDA_VISIBLE_DEVICES": "-1|[0-9]+", "LLM_NUM_GPU": "-1|0|",
++    "DETECTOR_DEVICE": "cpu|cuda:0", "DETECTOR_CUDA_VISIBLE_DEVICES": "[0-9]*",
++    "HABITAT_GPU_DEVICE": "[0-9]+", "HABITAT_SOFTWARE_RENDER": "[01]", "ALLOW_SHARED_GPU": "[01]",
++}
+ 
+ 
+ @dataclass(frozen=True)
+@@ -335,9 +342,13 @@ def replay_environment(path: Path) -> Dict[str, str]:
+         environment = record["environment"]
+     except (OSError, ValueError, KeyError, TypeError) as exc:
+         raise RuntimeError("%s is not a recorded GPU plan with an environment: %s" % (path, exc))
+-    if not isinstance(environment, dict) or not environment:
+-        raise RuntimeError("%s records no environment to replay" % path)
+-    return {str(key): str(value) for key, value in environment.items()}
++    if not isinstance(environment, dict) or set(environment) != set(PLAN_VARIABLES):
++        raise RuntimeError("%s does not contain the expected GPU environment variables" % path)
++    for key, pattern in PLAN_VARIABLES.items():
++        value = environment[key]
++        if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
++            raise RuntimeError("%s records an invalid GPU environment value for %s" % (path, key))
++    return environment
+ 
+ 
+ def render_env(result: GpuPlan) -> str:
+@@ -355,7 +366,7 @@ def _quote(value: str) -> str:
+ def main(argv=None):
+     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+     parser.add_argument("--gpu-device", type=int, default=int(os.environ.get("GPU_DEVICE", "0")))
+-    parser.add_argument("--format", choices=("json", "env"), default="json")
++    parser.add_argument("--format", choices=("json", "env", "assignments"), default="json")
+     parser.add_argument("--write", type=Path, help="Also write the plan as JSON to this path")
+     parser.add_argument("--replay", type=Path, metavar="GPU_PLAN_JSON",
+                         help="Do not plan: re-emit the plan this run recorded, so a resume's services start on the "
+@@ -366,14 +377,20 @@ def main(argv=None):
+         if args.write and args.write.resolve() != args.replay.resolve():
+             args.write.parent.mkdir(parents=True, exist_ok=True)
+             args.write.write_text(args.replay.read_text())
+-        print(render_environment(environment) if args.format == "env" else json.dumps(environment, indent=2))
+-        return 0
+-    result = plan_from_environment(args.gpu_device)
+-    record = dict(asdict(result), environment=result.environment())
+-    if args.write:
+-        args.write.parent.mkdir(parents=True, exist_ok=True)
+-        args.write.write_text(json.dumps(record, indent=2) + "\n")
+-    print(render_env(result) if args.format == "env" else json.dumps(record, indent=2))
++        record = environment
++    else:
++        result = plan_from_environment(args.gpu_device)
++        environment = result.environment()
++        record = dict(asdict(result), environment=environment)
++        if args.write:
++            args.write.parent.mkdir(parents=True, exist_ok=True)
++            args.write.write_text(json.dumps(record, indent=2) + "\n")
++    if args.format == "assignments":
++        print("\n".join("%s=%s" % (key, environment[key]) for key in PLAN_VARIABLES))
++    elif args.format == "env":
++        print(render_environment(environment), end="")
++    else:
++        print(json.dumps(record, indent=2))
+     return 0
+ 
+ 
+diff --git a/sparx_agency/tasks/planning/objnav_benchmark_runtime/tests/test_gpu_plan.py b/sparx_agency/tasks/planning/objnav_benchmark_runtime/tests/test_gpu_plan.py
+index 171e995e..031c37a3 100644
+--- a/sparx_agency/tasks/planning/objnav_benchmark_runtime/tests/test_gpu_plan.py
++++ b/sparx_agency/tasks/planning/objnav_benchmark_runtime/tests/test_gpu_plan.py
+@@ -224,3 +224,21 @@ def test_a_recorded_plan_is_replayed_as_the_environment_it_emitted(tmp_path):
+         gpu_plan.replay_environment(tmp_path / "bare.json")
+     with pytest.raises(RuntimeError):
+         gpu_plan.replay_environment(tmp_path / "missing.json")
++
++
++def test_replayed_assignments_round_trip_as_plain_data(tmp_path, capsys):
++    environment = plan(parts(), 0, "card", 24000, 1000).environment()
++    path = tmp_path / "gpu_plan.json"
++    path.write_text(json.dumps({"environment": environment}))
++    assert gpu_plan.main(["--replay", str(path), "--format", "assignments"]) == 0
++    lines = capsys.readouterr().out.splitlines()
++    assert dict(line.split("=", 1) for line in lines) == environment
++
++
++@pytest.mark.parametrize("overrides", [{"UNKNOWN_SETTING": "1"}, {"HABITAT_SOFTWARE_RENDER": "maybe"}])
++def test_replay_refuses_unknown_placement_fields_and_values(tmp_path, overrides):
++    environment = plan(parts(), 0, "card", 24000, 1000).environment()
++    path = tmp_path / "gpu_plan.json"
++    path.write_text(json.dumps({"environment": dict(environment, **overrides)}))
++    with pytest.raises(RuntimeError, match="environment"):
++        gpu_plan.replay_environment(path)
+diff --git a/sparx_agency/tasks/planning/objnav_benchmark_runtime/tests/test_workstation_4090.py b/sparx_agency/tasks/planning/objnav_benchmark_runtime/tests/test_workstation_4090.py
+index d025f949..5777727b 100644
+--- a/sparx_agency/tasks/planning/objnav_benchmark_runtime/tests/test_workstation_4090.py
++++ b/sparx_agency/tasks/planning/objnav_benchmark_runtime/tests/test_workstation_4090.py
+@@ -76,3 +76,35 @@ def test_resume_keeps_actual_concurrency_but_does_not_bypass_headroom(tmp_path):
+         ws.campaign_jobs(tmp_path, "mp3d", 2, settings)
+     with pytest.raises(ValueError, match="different settings"):
+         ws.campaign_jobs(tmp_path, "mp3d", 3, dict(settings, OLLAMA_NUM_PARALLEL="1"))
++
++
++def test_gt_detailed_launch_and_bare_resume_keep_the_sensor_and_logs(tmp_path, monkeypatch):
++    output = tmp_path / "full split"
++    ports, launches = [], []
++    monkeypatch.setenv("DETECTOR_PORT", "11450")
++    monkeypatch.setattr(ws, "require_idle_ports", ports.append)
++    monkeypatch.setattr(ws, "workstation_jobs", lambda profile, ceiling, settings: 3)
++    monkeypatch.setattr(ws.os, "execve", lambda path, argv, env: launches.append((argv, env)))
++    args = ["mp3d", "--run", "--output", str(output)]
++    ws.main(args + ["--gt-detailed"])
++    ws.main(args)
++    assert ports == [(11450,), (11450,)]
++    assert launches[0] == launches[1]
++    argv, env = launches[0]
++    assert argv[argv.index("--perception") + 1] == "ground-truth"
++    assert "--full-records" in argv and "--record-log-only" in argv and "--lean" not in argv
++    assert "--limit" not in argv and argv[argv.index("--shard-episodes") + 1] == "20"
++    assert env["YOLO_VRAM_MIB"] == "0" and env["GPU_PLAN_YOLO"] == "cpu"
++    assert env["OBJNAV_RESOURCE_MONITOR"] == "1" and env["LLM_ANSWERS_REPLAY"] == ""
++    assert env["LLM_ANSWERS_RECORD"] == str(tmp_path / "full split_vlm_answers")
++
++
++def test_fresh_gt_profile_cannot_reuse_an_old_answer_store(tmp_path):
++    output = tmp_path / "campaign"
++    answers = tmp_path / "campaign_vlm_answers"
++    answers.mkdir()
++    (answers / "answers-old.jsonl").touch()
++    settings = ws.profile_environment(ws.PROFILES["mp3d"], 2, 256, 11450, gt_log_root=output)
++    with pytest.raises(ValueError, match="own VLM answer store"):
++        ws.campaign_jobs(output, "mp3d", 4, settings)
++    assert not (output / "workstation_4090.json").exists()
+diff --git a/sparx_agency/tasks/planning/objnav_benchmark_runtime/workstation_4090.py b/sparx_agency/tasks/planning/objnav_benchmark_runtime/workstation_4090.py
+index 03417801..3f237306 100644
+--- a/sparx_agency/tasks/planning/objnav_benchmark_runtime/workstation_4090.py
++++ b/sparx_agency/tasks/planning/objnav_benchmark_runtime/workstation_4090.py
+@@ -28,7 +28,7 @@ RUNTIME = Path(__file__).resolve().parent
+ HOST_HEADROOM_MIB = 16 * 1024  # Model staging, detector and OS in addition to worker RSS.
+ 
+ 
+-def profile_environment(profile, slots, batch, port):
++def profile_environment(profile, slots, batch, port, *, gt_log_root=None):
+     """Settings consumed by benchmark_services.sh, gpu_plan.py and the scene children."""
+     env = os.environ
+     if (slots > 2 or batch > 256) and not env.get("LLM_VRAM_MIB"):
+@@ -49,10 +49,18 @@ def profile_environment(profile, slots, batch, port):
+         HABITAT_VRAM_MIB=env.get("HABITAT_VRAM_MIB", str(profile.renderer_mib)),
+         HAB_PY=env.get("HAB_PY", str(Path.home() / "miniconda3/envs/objnav-habitat/bin/python")),
+     )
+-    if any(int(settings[key]) < 1 for key in ("LLM_VRAM_MIB", "YOLO_VRAM_MIB", "HABITAT_VRAM_MIB", "GPU_RESERVE_MIB")):
++    budgets = ["LLM_VRAM_MIB", "HABITAT_VRAM_MIB", "GPU_RESERVE_MIB"]
++    if gt_log_root is not None:
++        settings.update(PERCEPTION="ground-truth", GPU_PLAN_YOLO="cpu", YOLO_VRAM_MIB="0",
++                        OBJNAV_RESOURCE_MONITOR="1", LLM_ANSWERS_RECORD=str(gt_log_root.parent / (gt_log_root.name + "_vlm_answers")))
++        for key in ("DETECTOR_HOST", "DETECTOR_PORT", "DETECTOR_THREADS"):
++            del settings[key]
++    else:
++        budgets.append("YOLO_VRAM_MIB")
++        if not 1 <= int(settings["DETECTOR_PORT"]) <= 65535 or int(settings["DETECTOR_PORT"]) == port:
++            raise ValueError("DETECTOR_PORT must be a valid port distinct from the Ollama port")
++    if any(int(settings[key]) < 1 for key in budgets):
+         raise ValueError("VRAM budgets and reserve must be positive MiB")
+-    if not 1 <= int(settings["DETECTOR_PORT"]) <= 65535 or int(settings["DETECTOR_PORT"]) == port:
+-        raise ValueError("DETECTOR_PORT must be a valid port distinct from the Ollama port")
+     return settings
+ 
+ 
+@@ -74,14 +82,23 @@ def workstation_jobs(profile, ceiling, settings):
+                        free_vram_mib=free, renderer_mib=renderer, reserve_mib=reserve)
+ 
+ 
++def recorded_profile(output):
++    """Read the profile without admitting workers or touching either service port."""
++    path = output / "workstation_4090.json"
++    if not path.is_file():
++        return None
++    record = json.loads(path.read_text())
++    if not isinstance(record, dict) or type(record.get("jobs")) is not int or not isinstance(record.get("settings"), dict):
++        raise ValueError(f"{path} is not a valid workstation profile")
++    return record
++
++
+ def campaign_jobs(output, dataset, jobs, settings):
+     """Persist the admitted concurrency. Don't mix runs with different server settings or replay an unsafe plan."""
+     output.mkdir(parents=True, exist_ok=True)
+     path = output / "workstation_4090.json"
+-    if path.is_file():
+-        record = json.loads(path.read_text())
+-        if not isinstance(record, dict) or type(record.get("jobs")) is not int:
+-            raise ValueError(f"{path} is not a valid workstation profile")
++    record = recorded_profile(output)
++    if record is not None:
+         if record.get("dataset") != dataset or record.get("settings") != settings:
+             raise ValueError(f"{path} has different settings; use the original profile or a fresh --output")
+         original = record["jobs"]
+@@ -90,6 +107,9 @@ def campaign_jobs(output, dataset, jobs, settings):
+         return original
+     if any(output.iterdir()):
+         raise ValueError(f"{output} is not empty and has no workstation profile; choose a fresh --output")
++    answers = settings.get("LLM_ANSWERS_RECORD")
++    if answers and Path(answers).exists() and any(Path(answers).iterdir()):
++        raise ValueError(f"{answers} already contains data; a fresh benchmark needs its own VLM answer store")
+     with path.open("x") as stream:
+         json.dump({"dataset": dataset, "jobs": jobs, "settings": settings}, stream, indent=2)
+         stream.write("\n")
+@@ -113,6 +133,9 @@ def main(argv=None):
+     mode = parser.add_mutually_exclusive_group()
+     mode.add_argument("--dry-run", action="store_true", help="print the profile only (default); no hardware probes")
+     mode.add_argument("--run", action="store_true", help="on the PC only: check resources and start the real benchmark")
++    parser.add_argument("--gt-detailed", action="store_true",
++                        help="use simulator ground truth only; record full episode diagnostics, steps, trajectories, "
++                             "VLM answers and utilization, without video (remembered on resume)")
+     parser.add_argument("--jobs", type=int, help="worker ceiling (default: 7 HM3D scenes or 4 MP3D shards)")
+     parser.add_argument("--slots", type=int, default=os.environ.get("OLLAMA_NUM_PARALLEL", "2"), help="Ollama request slots")
+     parser.add_argument("--batch", type=int, default=os.environ.get("LLM_NUM_BATCH", "256"), help="Ollama prefill tokens")
+@@ -127,13 +150,15 @@ def main(argv=None):
+         parser.error("HM3D v1 val has only 20 scene workers")
+     output = (args.output or Path(os.environ.get("RUNS_ROOT", "runs")) / f"{dataset}_v1_val_4090").expanduser().absolute()
+     try:
+-        settings = profile_environment(profile, args.slots, args.batch, args.llm_port)
++        record = recorded_profile(output)
++        gt = args.gt_detailed or (record is not None and record["settings"].get("PERCEPTION") == "ground-truth")
++        settings = profile_environment(profile, args.slots, args.batch, args.llm_port, gt_log_root=output if gt else None)
+         if dataset == "mp3d":
+             settings["VRAM_CAP"] = "0.88"
+         jobs = ceiling
+         if args.run:
+             jobs = workstation_jobs(profile, ceiling, settings)
+-            require_idle_ports((args.llm_port, int(settings["DETECTOR_PORT"])))
++            require_idle_ports((args.llm_port,) if gt else (args.llm_port, int(settings["DETECTOR_PORT"])))
+             jobs = campaign_jobs(output, dataset, jobs, settings)
+     except (ValueError, OSError) as exc:
+         parser.error(str(exc))
+@@ -141,7 +166,9 @@ def main(argv=None):
+     settings["GPU_PLAN_REPLAY"] = str(plan) if args.run and plan.is_file() else ""
+     settings["HABITAT_RENDERERS"] = str(jobs)
+     command = [str(RUNTIME / dataset / "run_benchmark.sh"), "--version", "v1", "--agent", "rpt",
+-               "--perception", "service", "--jobs", str(jobs), "--output", str(output)]
++               "--perception", "ground-truth" if gt else "service", "--jobs", str(jobs), "--output", str(output)]
++    if gt:
++        command.extend(["--full-records", "--record-log-only"])
+     if dataset == "mp3d":
+         command += ["--shard-episodes", "20", "--llm-servers", "1"]
+     print(f"{dataset.upper()} v1 val: {profile.episodes} episodes | workers {jobs} (ceiling {ceiling}) | "
