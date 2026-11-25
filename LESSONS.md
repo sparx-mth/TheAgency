@@ -11,6 +11,34 @@ Format per entry:
 
 ---
 
+## 2026-11-25 — A recorded MP3D shard died on "TURN_RIGHT should turn in place": the recording wrapper hid the step filter's placement from the kinematic check
+
+**Symptom:** `runs/mp3d_v1_val_4090` (full MP3D v1 val, ground-truth perception, `--record-log-only`), after 1,249
+episodes: `oLBMNvg9in8/shard_5` exit 1 at `oLBMNvg9in8/000093` action 85, `EnvContractError` from `check_step` --
+a TURN_RIGHT that "moved 0.057 m (0.000 m across the floor, +0.057 m up)". Raw motion: action 84, a MOVE_FORWARD,
+advanced 0.145 m and dropped 0.122 m; the turn after it rose 0.207 m with no horizontal motion, of which the 0.15 m
+`reproject_m` slack took 0.15.
+
+**Root cause:** The 2026-10-27 mechanism (a stride that ends off the mesh at a stale height; the next body action
+starts from the projection onto the mesh), and its fix was in place -- but not reachable. The runner reads
+`placed_pose` off the environment it is handed, and with any recording on that is `RecordingEnv` (the outermost
+wrapper, `evaluation.py`), which forwarded `pose_confirmed_on_navmesh` and not `placed_pose`. So every recorded run
+since 2026-10-27 has been judged by the scalar slack alone; `ProgressEnv` forwards everything through `__getattr__`,
+which is why unrecorded campaigns never showed it. Reproduced on the harness's own simulator
+(`runs/mp3d_v1_val_4090_support/probe_turn_lift.py`): after action 84 the agent is 0.156 m from the mesh
+(`is_navigable` false, projection 0.098 m across the floor and 0.122 m up), the turn carries it onto the mesh, and
+with that projection reported `check_motion` passes the turn as it stands.
+
+**Fix / workaround:** `RecordingEnv.placed_pose` forwards the hook. No tolerance changed. Pinned in
+`tests/test_recording_env_hooks.py` (the recorded poses: refused without the placement, passed with it, a slide
+beside it still refused; and the wrapper forwards every hook `runner._drive` reads). The MP3D shard merge does not
+compare `source_sha256`, so shards started before and after the fix merge; only a *partial* shard's resume needs
+`--resume-accepting-changes source_sha256`.
+
+**Don't:** raise `reproject_m` to cover it (0.21 m here; the 2026-10-27 entry says why a scalar cannot be sized).
+And when adding a checker-only hook to an environment, add it to every wrapper that does not forward by
+`__getattr__` -- a missing one fails silently into the weaker check.
+
 ## 2026-11-17 — Rewording a 3B's prompt: the probe scenarios could not rank two wordings, and a reply that skips nodes scores only the last one
 
 **Symptom:** rewriting the node oracle's prompt for `qwen2.5:3b-instruct` (`search_node_prompts.py`), a draft that

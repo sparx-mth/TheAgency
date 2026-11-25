@@ -393,6 +393,12 @@ class RecordingEnv(ObjNavEnv):
 		hook = getattr(self.env, "pose_confirmed_on_navmesh", None)
 		return bool(hook()) if hook is not None else False
 
+	def placed_pose(self):
+		# Checker-only, like the hook above: without it a recorded run's motions are judged by the scalar
+		# reproject_m alone, which refuses a turn that carries an off-mesh agent back (LESSONS 2026-11-25).
+		hook = getattr(self.env, "placed_pose", None)
+		return hook() if hook is not None else None
+
 	def measure(self):
 		return self.env.measure()
 

@@ -5,6 +5,12 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Fixed (2026-11-25, a recorded run's kinematic check never saw the step filter's placement)
+- `RecordingEnv.placed_pose` forwards the environment's checker-only hook, so a recorded run's turns and steps are
+  judged from where habitat-sim's step filter started them, as unrecorded runs already were. It ended
+  `oLBMNvg9in8/shard_5` of the full MP3D v1 val campaign at episode 000093 (`LESSONS.md` 2026-11-25); no tolerance
+  changed. Test: `tests/test_recording_env_hooks.py`.
+
 ### Added (2026-11-22, frontier views: which past frames show a frontier node, chosen from geometry before any model is asked -- the second piece of the VLM pipeline, `core/planning/object_search/frontier_views`, with its offline replay)
 - **The unit a picture is asked about.** `FrontierNode` (`nodes.py`): the clusters of the frontier inventory merged
   within 1.5 m of the longest, floored at five cells, with a sticky id from an `OpeningRegistry` and the seed's goal
