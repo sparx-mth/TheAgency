@@ -284,3 +284,7 @@ that the method stays free of the adapter (`test_package_boundaries.py`) and
 of the simulator's geometry (`test_no_privileged_geometry.py`), and the
 standing floor's three rules on small grids and random maps
 (`test_standing_floor.py`).
+
+## Independent Rank 4 experiment
+
+Remember one measured sighting after release for a different viewing angle and fresh verification. Default off; the frozen control and treatment differ only in `approach_release_retry`. From the repository root, preview with `python3 scripts/run_rank_ab.py`; add `--run` on the workstation. The diagnostic case labels never enter the policy.

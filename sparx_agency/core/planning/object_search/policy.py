@@ -775,6 +775,13 @@ class RPTSearchPolicy(_ObservedSearchPolicy):
         return self.glances.apply(observation, world, self._explore(observation, world))
 
     def _explore(self, observation, world):
+        retry = self.closing.release_view
+        if retry is not None:
+            command = None if self.closing.blind() else retry.command(self.closing, observation, world)
+            if command is not None:
+                return command
+            retry.end(self, retry.finished or "no detector frame")
+            self.closing.release_view = None
         command = self.frontiers.plan(observation, world)
         if command is not None:
             return command

@@ -1,0 +1,6 @@
+{
+  "allow_stair_traversal": false,
+  "target_closing": {
+    "approach_release_retry": true
+  }
+}

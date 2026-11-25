@@ -25,6 +25,7 @@ from sparx_agency.core.mapping.objects.support_surface import (
 from sparx_agency.core.planning.object_search.closing.target_backoff import BackoffManeuver
 from sparx_agency.core.planning.object_search.perception.target_context import suspect
 from sparx_agency.core.mapping.tracking.target_memory_3d import TargetMemory3D
+from sparx_agency.core.planning.object_search.closing.release_view import ReleaseView
 from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
 
 
@@ -115,6 +116,7 @@ class TargetClosingSettings:
     # cut edge) and the body faced to the box's bearing, so the next frame shows the object whole and the
     # ordinary start -- a projection, or a whole depthless box -- is judged on it; the bearing's bounds, its
     # two-frame persistence rule and its retry memory apply unchanged. False restores the silent drop.
+    approach_release_retry: bool = False
     bearing_start: bool = True
     bearing_clipped: bool = True
     bearing_max_actions: int = 16
@@ -564,6 +566,8 @@ class TargetClosingSettings:
     support_surface_classes: tuple = SUPPORT_SURFACE_CLASSES
 
     def __post_init__(self):
+        if type(self.approach_release_retry) is not bool:
+            raise ValueError('approach_release_retry must be boolean')
         if isinstance(self.confidence, bool) or not math.isfinite(self.confidence) or not 0 < self.confidence <= 1:
             raise ValueError("Target confidence must be in (0, 1]")
         if (isinstance(self.track_confidence, bool) or not math.isfinite(self.track_confidence)
@@ -834,6 +838,9 @@ class TargetClosing:
         self.bearing_failures = []         # (robot xy, floor id, action) per bearing approach given up
         self._depthless = []               # this frame's strong, whole boxes of the class with no usable depth
         self._in_frame = []                # this frame's whole boxes of the class at the threshold in force
+        self.release_view = None
+        self.release_view_tried = []
+        self.release_resightings = 0
         self._standing = None              # this action's standing floors, by clearance (``standing_floor``)
         self._clear()
 
@@ -850,6 +857,8 @@ class TargetClosing:
         self.floor_id = None
         self.failure = None
         self.path = TargetApproachPath(self.policy)
+        self.depth_witness = None
+        self.witness_step = -1
         self.observed_xyz = None
         self.observed_near_m = None        # near-edge range of the fresh observation, when measured
         self.inspection_started = None
@@ -1090,6 +1099,10 @@ class TargetClosing:
                 # consecutive count never reached two).
                 if range_m > s.rejection_min_range_m and self._rejected_nearby(xyz, p.mapping.floor_id, override=override):
                     self.resighting_exemptions += 1
+            elif (not self.active and strong and self.release_view is not None
+                  and self.release_view.new_evidence(obs, p.mapping.floor_id, detection.cls, xyz, radius)):
+                # A new angle and fresh associated depth bypass only the original spot's release veto.
+                pass
             elif not self.locked and range_m > s.rejection_min_range_m:
                 cooling = (not self.active and self.released_step is not None
                            and obs.step - self.released_step < s.release_cooldown_actions)
@@ -1272,6 +1285,14 @@ class TargetClosing:
         # "waiting for valid target depth" from 3.8 m) released every time. Since
         # 2026-10-21 such a box begins a BEARING approach instead (``bearing_start``): the
         # agent walks toward it along its image-space bearing until a frame has the depth.
+        if self.release_view is not None and projected and not self.active:
+            recovered = [row for row in projected if self.release_view.new_evidence(
+                obs, p.mapping.floor_id, row[0].cls, row[1], s.association_radius_m)]
+            if recovered:
+                projected = recovered
+                self.release_resightings += 1
+            self.release_view.end(p, "normal verification took ownership")
+            self.release_view = None
         if not self.active and projected:
             self.active, self.started, self.phase = True, obs.step, "VERIFY"
             self.verification_yaw = obs.pose.yaw
@@ -1300,6 +1321,9 @@ class TargetClosing:
             self.count = self.count + 1 if chained else 1
             self.sightings = (self.sightings if chained else []) + [here]
             self.last_sighting = obs.step
+            if self.target_only and s.approach_release_retry:
+                self.depth_witness = here
+                self.witness_step = int(obs.step)
             self.observed_xyz, self.observed_near_m = xyz, (None if near is None else float(near))
             heights = row.get("height_range_m")
             self.visible_floor_m = None if not heights else float(heights[0])
@@ -1441,6 +1465,9 @@ class TargetClosing:
             self.bearing_refusals += 1
             return
         error = self._bbox_error(obs, best.xyxy)
+        if self.release_view is not None:
+            self.release_view.end(p, "new bearing took ownership")
+            self.release_view = None
         self.active, self.started, self.phase = True, int(obs.step), "BEARING"
         self.verification_yaw = float(obs.pose.yaw)
         self.floor_id = p.mapping.floor_id
@@ -1706,6 +1733,16 @@ class TargetClosing:
         candidate was not disproved, the place the agent stood was.
         """
         p = self.policy
+        if (self.target_only and self.settings.approach_release_retry and self.depth_witness is not None
+                and self.observed_xyz is not None and self.floor_id == p.mapping.floor_id
+                and obs.step - self.witness_step <= self.settings.max_reacquire_steps
+                and self.best_conf >= self.settings.confidence and obs.step + 2 < p.episode.max_steps
+                and (why in ("unverified", self.TRUSTED_RELEASE, "no safe path from here")
+                     or why.startswith(("approach stalled:", "inspection blind:", "inspection saw nothing")))
+                and not any(f == self.floor_id and math.dist(xy, self.observed_xyz[:2]) <= self.settings.association_radius_m
+                            for f, xy in self.release_view_tried)):
+            self.release_view = ReleaseView(self, obs, self.depth_witness)
+            self.release_view_tried.append((self.floor_id, self.release_view.focus))
         if self.anchor is not None and remember:
             self.rejected.append((self.anchor, self.floor_id, obs.step,
                                   float(radius_factor) * self.settings.rejection_radius_m, str(why),
@@ -3087,6 +3124,8 @@ class TargetClosing:
     def diagnostics(self):
         return {"active": self.active, "locked": self.locked, "phase": self.phase,
                 "bearing": None if self.bearing is None else {k: v for k, v in self.bearing.items() if k != "moves"},
+                "release_view_attempts": len(self.release_view_tried),
+                "release_view_resightings": self.release_resightings,
                 "bearing_starts": self.bearing_starts, "bearing_resolved": self.bearing_resolved,
                 "bearing_abandoned": self.bearing_abandoned, "bearing_refusals": self.bearing_refusals,
                 "bearing_clipped_starts": self.bearing_clipped_starts,
