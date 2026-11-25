@@ -25,6 +25,7 @@ from sparx_agency.core.mapping.objects.support_surface import (
 from sparx_agency.core.planning.object_search.closing.target_backoff import BackoffManeuver
 from sparx_agency.core.planning.object_search.perception.target_context import suspect
 from sparx_agency.core.mapping.tracking.target_memory_3d import TargetMemory3D
+from sparx_agency.core.planning.object_search.closing.stop_view import StopView, uncertain
 from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
 
 
@@ -115,6 +116,7 @@ class TargetClosingSettings:
     # cut edge) and the body faced to the box's bearing, so the next frame shows the object whole and the
     # ordinary start -- a projection, or a whole depthless box -- is judged on it; the bearing's bounds, its
     # two-frame persistence rule and its retry memory apply unchanged. False restores the silent drop.
+    stop_reposition: bool = False
     bearing_start: bool = True
     bearing_clipped: bool = True
     bearing_max_actions: int = 16
@@ -564,6 +566,8 @@ class TargetClosingSettings:
     support_surface_classes: tuple = SUPPORT_SURFACE_CLASSES
 
     def __post_init__(self):
+        if type(self.stop_reposition) is not bool:
+            raise ValueError('stop_reposition must be boolean')
         if isinstance(self.confidence, bool) or not math.isfinite(self.confidence) or not 0 < self.confidence <= 1:
             raise ValueError("Target confidence must be in (0, 1]")
         if (isinstance(self.track_confidence, bool) or not math.isfinite(self.track_confidence)
@@ -834,6 +838,7 @@ class TargetClosing:
         self.bearing_failures = []         # (robot xy, floor id, action) per bearing approach given up
         self._depthless = []               # this frame's strong, whole boxes of the class with no usable depth
         self._in_frame = []                # this frame's whole boxes of the class at the threshold in force
+        self.repositions_started = 0
         self._standing = None              # this action's standing floors, by clearance (``standing_floor``)
         self._clear()
 
@@ -892,6 +897,9 @@ class TargetClosing:
         self.inspection_turn = None        # (step, sign) of the inspection's last centring turn on a fresh box
         self.sweep_actions = 0             # consecutive verification actions spent sweeping for a candidate out of view
         self.stop_approach = None          # the decided STOP's walk to the stop distance in progress (``_terminal``), else None
+        self.stop_view = None
+        self.stop_view_tried = False
+        self.stop_view_moved = False
         self.stop_decision = None          # what both stop measures read on the frame the STOP was decided (the record's)
         self.bearing = None                # the BEARING approach in force (an RGB box without depth): its box, yaw, counts
 
@@ -2133,6 +2141,16 @@ class TargetClosing:
             self.fail(self.failure)
         if self.stop_approach is not None:
             return self._stop_approach_step(obs)
+        if self.stop_view is not None:
+            command = None if self.blind() else self.stop_view.command(self, obs, world)
+            if command is not None:
+                return command
+            self.stop_view_moved = math.dist(self.stop_view.origin, (obs.pose.x, obs.pose.y)) > world.resolution
+            self.stop_view.end(p, self.stop_view.finished or "no detector frame")
+            self.stop_view = None
+            if self.stop_view_moved:
+                self.inspection_started = self.inspection_sighting = None
+                self.centring_step = -1
         if self.blind():
             return self._blind_frame(obs, world)
         if self.bearing is not None:
@@ -2832,6 +2850,22 @@ class TargetClosing:
             measured: Its fresh near-edge range, or None without a fresh box.
             info: The STOP's diagnostics, ``reason`` included.
         """
+        if self.target_only and self.settings.stop_reposition:
+            world = self.policy.last_world
+            if (not self.stop_view_tried and world is not None and obs.step + 2 < self.policy.episode.max_steps
+                    and self.floor_id == self.policy.mapping.floor_id and uncertain(self, obs, measured)):
+                self.stop_view_tried = True
+                view = StopView(self, obs)
+                command = view.command(self, obs, world)
+                if command is not None:
+                    self.stop_view = view
+                    self.repositions_started += 1
+                    self.phase = "STOP_REPOSITION"
+                    return command
+            if self.stop_view_moved and (self.blind() or self.last_seen != obs.step or measured is None):
+                # Evidence at the previous standing spot is not a STOP certificate at the new one.
+                self._release(obs, why="no fresh terminal evidence after reposition", remember=False)
+                return NavigationCommand.hold(final_yaw=obs.pose.yaw, info={"kind": "target_released"})
         self.phase = "STOP"
         s = self.settings
         here = (float(obs.pose.x), float(obs.pose.y))
@@ -3087,6 +3121,7 @@ class TargetClosing:
     def diagnostics(self):
         return {"active": self.active, "locked": self.locked, "phase": self.phase,
                 "bearing": None if self.bearing is None else {k: v for k, v in self.bearing.items() if k != "moves"},
+                "stop_repositions_started": self.repositions_started,
                 "bearing_starts": self.bearing_starts, "bearing_resolved": self.bearing_resolved,
                 "bearing_abandoned": self.bearing_abandoned, "bearing_refusals": self.bearing_refusals,
                 "bearing_clipped_starts": self.bearing_clipped_starts,
