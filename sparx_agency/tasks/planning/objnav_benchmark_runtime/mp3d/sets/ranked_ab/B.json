@@ -1,0 +1,6 @@
+{
+  "allow_stair_traversal": false,
+  "target_closing": {
+    "bearing_followup": true
+  }
+}
