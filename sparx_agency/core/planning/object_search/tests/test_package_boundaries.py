@@ -43,7 +43,6 @@ MAPPING_EXTRACTIONS = (
     "core/mapping/objects/target_evidence.py",
     "core/mapping/objects/support_surface.py",
     "core/mapping/tracking/target_memory_3d.py",
-    "core/mapping/topology/room_priors.py",
     "core/mapping/topology/revisable_room_labels.py",
 )
 

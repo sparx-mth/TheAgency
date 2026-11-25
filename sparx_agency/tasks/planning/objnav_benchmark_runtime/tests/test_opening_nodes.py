@@ -457,73 +457,18 @@ def test_a_new_opening_while_nothing_is_in_force_buys_the_oracle_a_call_at_most_
     assert reasoned == [0, 5, 6], "a room the estimate has never seen is valued at once, throttle or no throttle"
 
 
-# -- the weak-type rule --------------------------------------------------------------
-def test_a_weak_type_label_never_rules_a_room_out():
-    """Ranchester step 75: a toilet glimpsed through a door named the hallway a bathroom and every door
-    off it was demoted with it. Hanson step 321: a sofa made the room with the sink a 'living room' and
-    ruled it out for the toilet. One kind of object that names no room on its own (a sink: kitchen or
-    bathroom) is a guess the oracle sees as `type=bathroom?`; a signature object (a toilet) is not weak,
-    see test_room_scans."""
-    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
-    assert policy.target.query == "chair"
-    see(policy, {1: ["sink"]}, step=0)
-    policy.graph.relabel(1, 0)
-    info = policy.graph.label_info(1)
-    assert info["label"] == "bathroom" and info["strength"] == "weak"
-    command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert 1 not in policy.loop._excluded and policy.loop.stats["weak_type_kept"] == 1
-    kept = [e for e in policy.loop.events if e["event"] == "weak_type_kept"][0]
-    assert kept["room"] == 1 and kept["label"] == "bathroom" and kept["openings"] == 2 and kept["objects"] == ["sink"]
-    assert policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1", "still a node, still chosen by the order"
-    policy.loop.plan(obs_at(episode, 1, IN_A), world)
-    assert policy.loop.stats["weak_type_kept"] == 1, "logged once per room"
-    # The former openings allowance is not consulted any more: kept whatever the bound says.
-    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), weak_type_max_openings=2,
-                                                      type_prior=True)
-    see(policy, {1: ["sink"]}, step=0)
-    policy.graph.relabel(1, 0)
-    policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert 1 not in policy.loop._excluded and policy.loop.stats["weak_type_kept"] == 1
-    # A strong label (two kinds of object) rules the room out whatever its openings -- with the prior on.
-    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
-    see(policy, {1: ["toilet", "sink"]}, step=0)
-    policy.graph.relabel(1, 0)
-    assert policy.graph.label_info(1)["strength"] == "strong"
-    policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._excluded == {1: "type:bathroom"}
-    # LLM-first (the default): the strong bathroom is shown to the oracle with its type and valued by it.
-    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM())
-    assert not policy.loop.settings.type_prior
-    see(policy, {1: ["toilet", "sink"]}, step=0)
-    policy.graph.relabel(1, 0)
-    policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._excluded == {} and policy.loop.stats["excluded_type"] == 0
-    assert policy.reasoned_with[-1]["exclude"] == (), "every room is shown"
-
-
-def test_a_home_object_of_the_target_keeps_a_strongly_labelled_room_a_node():
-    """Hanson 2026-10-04: the bathroom's sink was merged into a room of sofas. For a toilet, a sink is
-    where it lives; the room stays a node whatever its label says."""
-    from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
-    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
-    policy.target = gibson_label_mapper().target_labels("toilet")
-    see(policy, {1: ["sofa", "bed"]}, step=0)                       # NamingLLM: a bedroom, strongly
-    policy.graph.relabel(1, 0)
-    assert policy.graph.label_info(1)["label"] == "bedroom" and policy.graph.label_info(1)["strength"] == "strong"
-    policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._excluded == {1: "type:bedroom"}, "with the prior on, a toilet is not searched for in a bedroom"
-    policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
-    policy.target = gibson_label_mapper().target_labels("toilet")
-    see(policy, {1: ["sofa", "bed", "shower"]}, step=0)             # still a bedroom to the classifier
-    policy.graph.relabel(1, 0)
-    info = policy.graph.label_info(1)
-    # A bed and a shower in one region are signature objects of two types: the merge showing, so the label is
-    # WEAK since 2026-10-21 (``conflicting_signatures``) -- and the home object keeps the room a node either way.
-    assert info["label"] == "bedroom" and info["strength"] == "weak" and info["conflicting_signatures"]
-    policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert 1 not in policy.loop._excluded and policy.loop.stats["home_object_kept"] == 1
-    kept = [e for e in policy.loop.events if e["event"] == "home_object_kept"][0]
-    assert kept["room"] == 1 and kept["home_objects"] == ["shower"]
+# -- every room is a node --------------------------------------------------------------
+def test_a_room_with_any_type_label_is_shown_to_the_oracle_and_stays_a_node():
+    """No table rules a room out for the target: the oracle sees every room with its type and values it."""
+    for objects in (["sink"], ["toilet", "sink"]):
+        policy, episode, world, rooms, _ = opening_policy(order=(1, 0), llm=NamingLLM())
+        assert policy.target.query == "chair"
+        see(policy, {1: objects}, step=0)
+        policy.graph.relabel(1, 0)
+        command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
+        assert policy.loop._excluded == {}
+        assert policy.reasoned_with[-1]["exclude"] == (), "every room is shown"
+        assert policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1", "still chosen by the order"
 
 
 # -- target landmarks as nodes -----------------------------------------------------------

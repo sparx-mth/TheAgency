@@ -449,7 +449,7 @@ def test_a_confident_box_cut_by_the_left_edge_turns_the_agent_toward_it_when_unk
     assert scheduler.stats["cues_repeated"] == 1 and (scheduler.active is None or scheduler.active.get("cue") is None)
 
 
-def test_a_cue_needs_unknown_floor_on_its_side_unless_it_is_the_target_or_a_home_object():
+def test_a_cue_needs_unknown_floor_on_its_side_unless_it_is_the_target():
     route = route_east()
     command = follow(route)
     # From x = 2 the scorer's own glance point (abreast of the door) is still ahead: only a cue starts a look here.
@@ -466,11 +466,11 @@ def test_a_cue_needs_unknown_floor_on_its_side_unless_it_is_the_target_or_a_home
     out = scheduler.apply(obs_at(camera, 0, here), world, command)
     assert scheduler.active is not None and scheduler.active["kind"] == RIGHT and scheduler.active["cue"] == "toilet"
     assert scheduler.active["gain_m2"] == 0.0 and out.info["cue"] == "toilet"
-    # A home object of the target (a sink, for a toilet) too; a box in the middle of the frame is no cue; a weak one neither.
+    # Only the target's own class is a cue outright: a sink on the same edge is not; a box in the middle of the frame is
+    # no cue; a weak one neither.
     policy, camera, actions = cue_policy(route, [Box("sink", 0.5, (560.0, 120.0, 640.0, 400.0))])
     scheduler = GlanceScheduler(policy)
-    scheduler.apply(obs_at(camera, 0, here), world, command)
-    assert scheduler.active is not None and scheduler.active["cue"] == "sink"
+    assert scheduler.apply(obs_at(camera, 0, here), world, command) is command and scheduler.active is None
     policy, camera, actions = cue_policy(route, [Box("sink", 0.9, (200.0, 120.0, 400.0, 400.0)),
                                                  Box("toilet", 0.2, (0.0, 120.0, 90.0, 400.0)),
                                                  Box("toilet", 0.9, (600.0, 200.0, 640.0, 260.0))])   # a speck: 60 px tall

@@ -25,8 +25,7 @@ def gibson_label_mapper() -> TableLabelMapper:
     # scores every prompt against the crop and lands on the nearest one it was given,
     # so a child's ride-on horse read as "chair" at 0.9 (Hanson/000001) when no toy
     # was in the vocabulary. A distractor class is never a navigation goal and never
-    # names a room; it only gives the wrong match somewhere else to go. "bathtub" is a
-    # home object of the toilet (room_priors.HOME_OBJECTS) that the vocabulary lacked.
+    # names a room; it only gives the wrong match somewhere else to go.
     return TableLabelMapper(
         "gibson", table,
         context_vocabulary=("dining table", "oven", "sink", "refrigerator",

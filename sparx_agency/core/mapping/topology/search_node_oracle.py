@@ -121,7 +121,7 @@ looking. You reason like a person who knows how homes are laid out and where thi
 NODE LINES.
 ROOM: a region the robot segmented. type= was inferred from the objects seen in it \
 (unknown = NOT IDENTIFIED YET, never "empty"; a type ending in "?" rests on a single kind \
-of object and may be wrong -- a sink alone reads as a kitchen until a toilet shows). \
+of object and may be wrong). \
 size= floor area. frontier= unexplored boundaries still accessible inside it (0 is NOT \
 proof that nothing is there). exits= the doorways and gaps at its edge that lead to space \
 NOT seen yet -- rooms the robot has not entered. They are NOT nodes of their own: going to \
@@ -130,8 +130,7 @@ seen door frame and about how much unexplored floor the camera could reach beyon
 (exits=2 (1 doorway, ~30m2 unseen behind them)): a room whose exits open onto a large unseen \
 area is where rooms not found yet must be, one whose exits open onto a few m2 leads nowhere \
 new. glimpsed through its exits: objects seen beyond \
-those thresholds -- they name the rooms BEHIND the exits (a toilet -> a bathroom; a bed -> a \
-bedroom), not this room. status= one of: never_entered (only seen from \
+those thresholds -- they hint at the rooms BEHIND the exits, not this room. status= one of: never_entered (only seen from \
 outside, or not at all); entered (the robot stood in it and its camera has seen most of what \
 is mapped of it, but it never completed a look-around: what is left of it lies behind its \
 frontier= boundaries and its exits=); \
@@ -147,44 +146,30 @@ used of the total. Use ALL of it.
 
 EXITS. What lies behind a room's exits is decided by the HOME, never by the count alone: an \
 exit leads to a room of this home, and the rooms the home still lacks say which. Exits RAISE \
-a room ONLY when its type fits the target -- a bathroom with an unlooked door (a second \
-bathroom or an en-suite beyond it) when the target is a toilet; a bedroom whose exit may be \
-an en-suite's; a kitchen's exits for a refrigerator -- or when a glimpse through one of them \
-names the home type (a toilet glimpsed through an exit of the hallway: that room is the \
-bathroom seen from its door, 60 or more). Exits of a hallway, a corridor or an unidentified \
-room are valued by what the home still lacks behind them: while the bathroom is missing, \
-they are where it must be. Exits of a room whose type does NOT fit the target do NOT raise \
-it, however many: three gaps off a living room, for a toilet, lead to strips of the living \
-room or to rooms already found, and the living room stays low. A room with many exits and no \
-fit is no more promising than one with none.
+a room ONLY when its type fits the target, or when a glimpse through one of them shows the \
+room where the target normally lives (then 60 or more). Exits of a hallway, a corridor or an \
+unidentified room are valued by what the home still lacks behind them: while the room where \
+the target normally lives is missing, they are where it must be. Exits of a room whose type \
+does NOT fit the target do NOT raise it, however many: they lead to strips of that room or to \
+rooms already found. A room with many exits and no fit is no more promising than one with \
+none.
 
 HOW TO JUDGE. Work in this order and write steps 1-3 into the reply before any number.
 STEP 1 "home": the room types where this object normally lives, most likely first, and \
-where it is rare. Typical homes: a toilet in a bathroom -- a separate one, or an en-suite \
-reached through a bedroom; a bed in a bedroom; a sofa or couch in a living room (sometimes a \
-family room or an office); a television in a living room, then a bedroom, rarely a kitchen, \
-never a bathroom; a chair in a dining room, kitchen, office, bedroom or living room; a potted \
-plant in a living room, hallway, kitchen or balcony; a refrigerator, oven or stove in a \
-kitchen; a bathtub or shower in a bathroom. Small objects that travel (cup, book, bottle) \
-have a home too, only a weaker one.
-STEP 2 "house": read the home from the rooms found. A typical home has ONE kitchen, ONE \
-living room, ONE dining area, one to four bedrooms, one to three bathrooms (one often \
-en-suite off the main bedroom), a hallway, perhaps an office, a laundry or a garage. If a \
-type that occurs once has been FOUND, an unidentified room is unlikely to be another of it, \
-and the odds of the target's home being among the unidentified rooms drop. If the home type \
-is still MISSING, the unidentified rooms and the unlooked exits are where it must be: value \
-them in proportion to how well their size fits the home type (bathrooms ARE small, 3-8 m2; \
-bedrooms 9-20 m2; living rooms 15 m2 and up) and to what else the home still lacks -- \
-never write a room off for its size. A home-type object seen in a room of ANOTHER type (a \
-sink in a "living room", a bed in a "kitchen") means the map merged two rooms: value that \
-room as the home type.
+where it is rare.
+STEP 2 "house": read the home from the rooms found. If the room type where the target \
+normally lives has been FOUND, an unidentified room is less likely to be another of it, and \
+the odds of the target's home being among the unidentified rooms drop. If the home type is \
+still MISSING, the unidentified rooms and the unlooked exits are where it must be: value them \
+by how well their size fits that room type and by what else the home still lacks -- never \
+write a room off for its size. A home-type object seen in a room of ANOTHER type means the \
+map merged two rooms: value that room as the home type.
 STEP 3 "stage": weigh the budget. EARLY -- much budget left and unexplored places remain: \
 the target is most likely somewhere not yet looked at; unexplored rooms and the rooms whose \
 exits lead to them first, scanned rooms low. LATE -- most of the home seen, few or no \
 unexplored places or frontier \
 left, the home type found but the target not seen: the detector may have MISSED the target in a \
-scanned room of a fitting type (a toilet behind a half-open door, a television on a wall \
-the scan grazed, a chair under a table), and the chance that an unseen room holds it \
+scanned room of a fitting type, and the chance that an unseen room holds it \
 falls with every place looked at; raise the scanned rooms of the home type -- a second look \
 from a different spot -- and lower the rest. Write "pass": "first" while an unexplored place \
 in this home is still worth looking at before any scanned room is re-checked, else "second". \
@@ -217,7 +202,7 @@ value it by what the home still lacks behind them.
 The longer searched= reads on an entered room, the lower its number: time already spent inside \
 is evidence the target is not there.
  - SPREAD, do not copy: the unexplored rooms and the exits of the rooms found compete for the \
-same missing rooms. A missing bathroom is ONE room, so five unlooked exits spread over three \
+same missing rooms. A missing room type is ONE room, so five unlooked exits spread over three \
 rooms share its chance -- the room whose type and exits fit it best gets most, the others \
 about 10-15, never 35 on every room with an exit; with many exits and one or two missing \
 home-type rooms, most such rooms get under 15. Several exits often lead to the same hallway. \
@@ -232,28 +217,19 @@ and what decided it), then "p".
 Reply with ONLY this JSON, keys in this order:
 {"home":"<step 1, max 12 words>","house":"<step 2, max 25 words>","stage":"<step 3, max 20 words>",
  "pass":"first|second","nodes":[{"id":<int>,"why":"<why>","p":<int>}, ...]}
-EXAMPLE of the FORMAT and the style of reasoning -- a different home every time, so never \
-copy its numbers or its words. TARGET toilet; HOUSE: rooms found: kitchen (scanned), \
-living_room (scanned), bedroom (never entered), hallway (entered); 1 room unidentified; 3 \
-openings not yet looked into; actions used about 150 of 500:
-id=2  ROOM  type=kitchen  size=12m2  frontier=0  exits=0  status=scanned(full rotation, 2min ago)  searched=30s  seen: oven, refrigerator, sink
-id=3  ROOM  type=living_room  size=24m2  frontier=1  exits=1  status=scanned(full rotation, 1min ago)  searched=40s  seen: sofa, television
-id=5  ROOM  type=bedroom  size=14m2  frontier=1  exits=1 (1 doorway)  status=never_entered  searched=0s  seen: bed
-id=6  ROOM  type=unknown  size=5m2  frontier=1  exits=0  status=never_entered  searched=0s  seen: nothing yet
-id=7  ROOM  type=hallway  size=6m2  frontier=1  exits=1 (1 doorway)  status=entered  searched=10s  here=yes  seen: nothing yet
-{"home":"bathroom; often an en-suite off a bedroom",
- "house":"kitchen and living room found and scanned; no bathroom yet; one unidentified room, bathroom-sized; unlooked doorways off the bedroom and the hallway",
- "stage":"early, 150 of 500 used, unexplored places remain: first pass",
+EXAMPLE of the FORMAT only -- every word and number in it is a placeholder, never copy it. \
+TARGET <category>; HOUSE: <room types found>; <n> rooms unidentified; <n> openings not yet \
+looked into; actions used about <a> of <b>:
+id=2  ROOM  type=<type>  size=<m2>  frontier=<n>  exits=<n>  status=scanned(<how>, <ago>)  searched=<s>  seen: <objects>
+id=5  ROOM  type=<type>  size=<m2>  frontier=<n>  exits=<n> (<k> doorway)  status=never_entered  searched=0s  seen: <objects>
+id=6  ROOM  type=unknown  size=<m2>  frontier=<n>  exits=<n>  status=never_entered  searched=0s  seen: nothing yet
+{"home":"<room types where the target lives>",
+ "house":"<what the home has and still lacks>",
+ "stage":"<budget and pass>",
  "pass":"first",
- "nodes":[{"id":2,"why":"kitchen, scanned, toilets are not in kitchens","p":1},
-{"id":3,"why":"living room, scanned; its gap is no bathroom door","p":2},
-{"id":5,"why":"bedroom never entered, its doorway may be an en-suite's","p":35},
-{"id":6,"why":"small unidentified room, bathroom sized, bathroom missing","p":50},
-{"id":7,"why":"hallway; its unlooked doorway leads to the missing bathroom","p":25}]}
-Had the HOUSE line read "every known room identified; 0 openings not yet looked into; no \
-unexplored frontier left; actions used about 420 of 500" with a bathroom found and scanned 4 \
-minutes ago, the pass would be "second": the scanned bathroom 35, the scanned bedroom 8 (an \
-en-suite door the scan may have missed), and the scanned kitchen and living room 1 each."""
+ "nodes":[{"id":2,"why":"<type, status, what decided it>","p":<int>},
+{"id":5,"why":"<type, status, what decided it>","p":<int>},
+{"id":6,"why":"<type, status, what decided it>","p":<int>}]}"""
 
 #: Appended to :data:`SYSTEM_PROMPT` when an OPENING node is offered -- the deprecated
 #: exits-as-nodes mode (``OpeningSettings.exits_as_nodes``, the 2026-10-04 design): an exit
@@ -336,10 +312,8 @@ class SearchNode:
         arrived_ago_s: Stairs: seconds since that arrival, when ``arrived_by``.
         via: Opening: the mapped room it opens from, in prompt words --
             ``room 6 (type=bathroom?)`` -- or None when unknown.
-        home: The room holds a confirmed HOME OBJECT of the target (a
-            bathtub or a sink for a toilet, a television for a sofa). Read
-            at the oracle's ``home_floor`` at least when that floor is on;
-            the loop sets it from ``room_priors.HOME_OBJECTS``.
+        home: Unused: nothing sets it since the hand-written home-object
+            table was removed.
         scanned: How the room was finished by the scan ledger, in prompt
             words (``full rotation``, ``seen from another room's scan``,
             ``looked into, no frontier left``, ``fragment``), or None while

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Name the rooms</title>
+<style>
+:root{--bg:#f6f6f4;--card:#fff;--ink:#1c1c1a;--mute:#6b6b66;--line:#d9d9d3;--accent:#2f6fdb;--done:#2e8b57}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--card:#1f1f1d;--ink:#ecece8;--mute:#9a9a93;--line:#3a3a36;--accent:#6aa2ff;--done:#58c08a}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,sans-serif}
+header{position:sticky;top:0;background:var(--bg);padding:10px 16px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center;flex-wrap:wrap;z-index:2}
+.bar{flex:1;min-width:120px;height:8px;background:var(--line);border-radius:4px;overflow:hidden}.bar i{display:block;height:100%;background:var(--done)}
+main{padding:12px 16px;max-width:1500px;margin:auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:8px}
+figure{margin:0;position:relative}figure img{width:100%;display:block;border-radius:6px;cursor:zoom-in}
+figure b{position:absolute;left:8px;top:6px;color:#fff;background:#d33;padding:0 7px;border-radius:4px}
+.map{max-width:380px;width:100%;border-radius:6px;background:#fff}
+.options{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+button{font:inherit;padding:9px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
+button:hover{border-color:var(--accent)}button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.mute{color:var(--mute)}
+details{margin-top:10px}summary{cursor:pointer;color:var(--mute)}
+dialog{border:0;padding:0;background:transparent;max-width:96vw}dialog img{max-width:96vw;max-height:94vh;border-radius:8px}dialog::backdrop{background:#000c}
+</style></head><body>
+<header><strong id="title"></strong><div class="bar"><i id="fill"></i></div><span id="count" class="mute"></span>
+<span class="nav"><button id="prev">&larr; Back</button><button id="skip">Next &rarr;</button></span></header>
+<main>
+<div class="mute" id="meta"></div>
+<div class="grid" id="frames"></div>
+<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;margin-top:10px"><img class="map" id="map" alt="floor map"><div style="flex:1;min-width:260px">
+<div class="mute">What room is this? Blue is the room's floor on the map, red arrows are the camera positions A, B, C&hellip;</div>
+<div class="options" id="options"></div>
+<details><summary>Show what the model guessed (do this after choosing, if at all)</summary><div id="guess"></div></details>
+<details><summary>Show the annotated objects of the room</summary><div id="objects" class="mute"></div></details>
+</div></div></main>
+<dialog id="zoom"><img id="zoomed" alt=""></dialog>
+<script>
+let state, at = 0;
+const $ = id => document.getElementById(id);
+const save = (room, room_type) => fetch('/api/label', {method:'POST', body:JSON.stringify({room, room_type})});
+async function load(){ state = await (await fetch('/api/state')).json(); at = Math.max(0, state.rooms.findIndex(r => !state.labels[r.room])); show(); }
+function show(){
+  const r = state.rooms[at], done = Object.keys(state.labels).length, total = state.rooms.length;
+  $('title').textContent = r.room; $('count').textContent = (at+1) + ' of ' + total + ' · ' + done + ' named';
+  $('fill').style.width = (100*done/total) + '%'; $('meta').textContent = 'scene ' + r.scene + ' · about ' + r.area_m2 + ' m²' + (r.mixed ? ' · WARNING: these frames mostly show other rooms, the region is probably not a room of its own (choose "not a room" or "unsure")' : '');
+  $('frames').innerHTML = r.frames.map((u,i) => '<figure><b>' + 'ABCDEF'[i] + '</b><img src="' + u + '" data-full="' + u + '"></figure>').join('');
+  $('map').src = '/map/' + r.room + '.png';
+  $('options').innerHTML = state.options.map(o => '<button class="' + (state.labels[r.room]===o?'on':'') + '" data-o="' + o + '">' + o + '</button>').join('');
+  $('guess').textContent = r.guess || '–'; $('objects').textContent = r.objects;
+}
+document.addEventListener('click', async e => {
+  if (e.target.matches('#options button')) {
+    const r = state.rooms[at]; state.labels[r.room] = e.target.dataset.o; await save(r.room, e.target.dataset.o);
+    if (at < state.rooms.length - 1) at++; show(); window.scrollTo(0,0);
+  } else if (e.target.matches('#frames img')) { $('zoomed').src = e.target.dataset.full; $('zoom').showModal(); }
+  else if (e.target.id === 'zoom' || e.target.id === 'zoomed') $('zoom').close();
+});
+$('prev').onclick = () => { at = Math.max(0, at-1); show(); }; $('skip').onclick = () => { at = Math.min(state.rooms.length-1, at+1); show(); };
+document.addEventListener('keydown', e => { if (e.key==='ArrowLeft') $('prev').click(); if (e.key==='ArrowRight') $('skip').click(); });
+load();
+</script></body></html>

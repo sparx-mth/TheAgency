@@ -6,7 +6,6 @@ from sparx_agency.core.planning.exploration.object_search_supervisor import Obje
 from sparx_agency.core.planning.object_search.perception.doors import ObservedDoors
 from sparx_agency.core.mapping.objects.target_evidence import TargetEvidence
 from sparx_agency.core.planning.object_search.rooms.oracle_retry import RepairingNodeOracle
-from sparx_agency.core.mapping.topology.room_priors import home_object
 from sparx_agency.core.planning.object_search.rooms.room_search_loop import RoomSearchLoop
 from sparx_agency.core.planning.object_search.rooms.scene_graph import ObservedSceneGraph
 
@@ -35,8 +34,6 @@ class FloorContextBank:
         p.graph.oracle = RepairingNodeOracle(p.llm_client, unexplored_floor=p.loop_settings.unexplored_floor,
                                              unexplored_elsewhere=p.loop_settings.unexplored_elsewhere,
                                              home_floor=p.loop_settings.home_floor)
-        # The oracle's ``home`` flag per room: a confirmed home object of THIS target.
-        p.graph.home_object = lambda class_name, target=p.target: home_object(target, class_name)
         # The frontier is read with the settled unknown written occupied: what the
         # camera looked through without a return, and the enclosed pockets.
         sight = getattr(p, "sight", None)

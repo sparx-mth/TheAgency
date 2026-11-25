@@ -174,25 +174,8 @@ rejection around the toilet followed. Three rules of `TargetClosing` answer it:
   is off whenever the action spec has the tilt pair -- there the dynamic pitch
   controller (below) is its counterpart (`blind_cone_stops`).
 
-**The context check** (`core/planning/object_search/perception/target_context.py`, `context_check`, since
-2026-10-07). A detector's confidence is a score over the crop; it knows nothing
-about the room the crop was taken in or how high the surface it fired on is.
-Allensville/2 and Newfields/2 of the 5x3 benchmark STOPped on a kitchen counter
-front read as `bed` from 0.55 m -- its supported points 0.67-0.70 m above the
-agent's base where every real bed of the recording measured 0.11-0.52 m, inside
-a room the map had made a STRONG kitchen from its refrigerator and oven -- after
-two frames from one spot. A candidate is **suspect** when its footprint lies in
-a room whose strong type is one the target is not searched for in
-(`room_priors.IMPLAUSIBLE_ROOMS`, `room:kitchen`) or when its measured centroid
-height contradicts its class (`CLASS_HEIGHT_BANDS`, calibrated on the Allensville
-recordings: a bed's or a toilet's surface under 0.60 m above the base,
-`height:0.69`). A suspect box counts `context_penalty` (0.70) of its confidence
-toward the start threshold (0.60 x 0.70 is no takeover; 0.75 is), and its lock
-needs `context_confirmation_frames` (4) consecutive frames from at least two
-viewpoints `context_baseline_m` (0.30 m) apart -- a turn in place is not a
-second viewpoint (`suspect`, `context_rejections`, `suspect_locks_held` in the
-diagnostics and the HUD). It is a penalty, not a refusal: a bed in a room the
-partition merged with a kitchen is still locked, from two places.
+**The context check** (a penalty and a multi-viewpoint lock for a candidate in a room or at a height
+its class is not seen at) was removed on 2026-11-12: it rested on hand-written room and height tables.
 
 **Before the lock, ownership is provisional.** A fresh candidate within one
 turn of the image centre is *stepped toward*, not centred (since 2026-10-05):
@@ -825,7 +808,6 @@ and a pose, and answers in world coordinates.
 | `closing/target_backoff.py` | The backing manoeuvre for a target seen suddenly at arm's length: a verified clear spot two or three steps back (trail, grid, floor guard, A*, NavMesh) that the observed grid shows the target from (`_sees`), the turn back, the hand-off to re-verification |
 | `perception/cycle.py`, `perception/projection.py` | Fresh raw predictions, coherent pixel projection with a footprint radius, floor-qualified fusion, plan-view association within a class with a height check |
 | `perception/doors.py` | Confirmed doorway landmarks from the detector's door boxes |
-| `perception/target_context.py` | The semantic sanity check on a candidate: a STRONG room type the target is not searched for in, or a measured height its class is never seen at (a counter top read as a bed) -- a penalty and a multi-viewpoint lock, not a refusal |
 | `rooms/room_search_loop.py` | The seven-step room-search loop: one scan visit per room (vantage point, full rotation, finished for the episode) or the bounded room-confined sweep; re-classify → re-estimate → re-order at each loop point over the rooms that are still nodes; transit to the chosen room's vantage point / nearest frontier or to the foot of the chosen stairs; a room re-identified by a new kind of object ends its turn for a fresh solve |
 | `rooms/scene_graph.py` | Observed rooms and doors, the room label image, the nodes handed to the oracle |
 | `rooms/room_scans.py` | The scan ledger: where every completed look-around stood, on every floor; a room is finished when a scan stood in it or saw more than half of it through observed free space, or -- with no live frontier left -- when the camera looked into it or walked it through (`seen_through`), or when it is a doorless fragment under 3 m2 -- sticky, id-independent |
@@ -868,7 +850,7 @@ action converter serialises the LOOK before the body action):
 | `objects/support_surface.py` | Whether a box of another class is the surface the target stands on: exact class membership and strict geometry under the memory's footprint |
 | `objects/landmarks.py` | The landmark map: per-class association (a tight dedupe radius or footprint-disc IoU; classes never merge), confirmation by observation count; the class vote of 2026-10-04 kept behind `class_votes=True` |
 | `tracking/target_memory_3d.py` | The closing's 3-D memory: the fused, precision-weighted XYZ centroid (near frames dominate), its standard error and spread, the fixed association anchor |
-| `topology/room_priors.py`, `topology/revisable_room_labels.py` | Where a target cannot be (exclusions, not permissions; `unknown` never excluded); one-object (weak) and two-class (strong) room labels revised the action a new kind of object lands |
+| `topology/revisable_room_labels.py` | one-object (weak) and two-class (strong) room labels revised the action a new kind of object lands |
 | `topology/search_node_oracle.py` | The node oracle: one call per loop point, to the LLM client's REASONING model, over every room still a node and every staircase -- P(going there next finds the target) per node plus "elsewhere" |
 
 **The adapters and the operator tooling** (this tree):
@@ -1195,7 +1177,7 @@ refresh.
    model writes (the prompt now says so too: "searched 20 s or longer with
    frontier 0 or 1 is as good as scanned: 0-5"). The
    three arithmetic floors below (`unexplored_floor`, `unexplored_elsewhere`,
-   `home_floor`) and the hard type exclusion (`type_prior`) are **off by
+   `home_floor`) are **off by
    default** -- they were the 3B era's defaults, and the model is given the
    facts they encoded instead; each stays a knob. The storey/stairs
    reasoning of the multi-storey development protocol is a supplement to
@@ -1244,64 +1226,15 @@ refresh.
 
    **What is not a node (the first pass).** At every loop point the loop
    withholds finished rooms from the solver and the transit until the
-   storey is covered, and records why (`excluded` in the events,
-   estimates and HUD); with `LoopSettings.type_prior` switched on it also
-   withholds a room whose identified type **cannot hold the target**
-   (`core/mapping/topology/room_priors.py`: a sofa is not
-   searched for in a bedroom, a bathroom or a kitchen; a toilet not in a
-   bedroom; the table is exclusions, not permissions, so a hallway stays
-   searchable and `unknown` is never excluded). Since 2026-10-05 the type
-   rule has three guards (`room_priors.ruled_out`): it applies to a
-   **strong** label only (two or more kinds of object agree -- a weak
-   label is a guess the oracle sees as `type=bedroom?` and values itself,
-   `weak_type_kept` events); never when an object of the target's own
-   class has been confirmed in the room; and never when a **home object**
-   of the target stands in it (`HOME_OBJECTS`: a sink or a shower where a
-   toilet lives -- the Hanson recording merged a bathroom's sink into a
-   "living room" of sofas and ruled it out for the toilet a metre from
-   the sink; `home_object_kept` events). **One signature object makes a
-   label strong** (`room_priors.SIGNATURE_OBJECTS`,
-   `RoomLabelSettings.signature_objects`, since 2026-10-05): a bed is a
-   bedroom, a toilet, a shower or a bathtub a bathroom, an oven, a stove or
-   a refrigerator a kitchen, with no second kind of object needed, when the
-   classifier's label agrees -- the Hanson re-fly of 2026-10-05 saw a bed
-   and a television through a doorway at action 270, kept the "bedroom?"
-   weak and walked in to scan it for a toilet (actions 270-289). A chair,
-   a cabinet, a desk or a plant names nothing on its own and stays weak;
-   the home-object guard still holds (a bed in a room with a sink keeps
-   the room a node for a toilet). The two kinds that make a label strong
-   must include one that is **distinctive**
-   (`RoomLabelSettings.distinctive_required`, `room_priors.GENERIC_OBJECTS`:
-   a cabinet, a plant, a book, a vase, a clock, a cup, a bottle describe no
-   room): the Ranchester couch search had a cabinet and a potted plant make
-   an upstairs room a strong "living_room" at 0.95, which put a living room
-   on the storey summary the node oracle reads and wobbled its verdict on
-   where living rooms are. **A home object is a prior, not only a guard**
-   (`LoopSettings.home_floor`, off by default since the LLM-first change;
-   0.60 restores it): a room holding a
-   confirmed home object of the target is handed to the oracle with
-   `SearchNode.home` set and, with the floor on, is never read below it,
-   whatever the model wrote and whatever its storey verdict says -- a
-   bathtub on this storey IS the toilet's home type, found -- and such a
-   room is **never finished by sight from outside it** (this guard stands
-   regardless): the scan ledger's `seen_from_scan`
-   and `seen_through` verdicts (half its floor seen through its door) do not
-   exclude it, only a scan the agent stood in does (`home_object_kept` events
-   with `scanned`). The Allensville toilet run's warm-up spin at the spawn
-   point saw more than half of the bathroom's floor through its door,
-   finished it with the bathtub inside and the toilet behind the jamb, valued
-   it 0 and peeked twenty openings before coming back to it at action 283.
-   **The labels are read before the nodes
-   are chosen** (`ObservedSceneGraph.refresh_labels` at the loop point):
-   until 2026-10-05 the re-classification ran inside the oracle call,
-   after the exclusions, so a room that became a strong bedroom on that
-   very action was shown to the oracle, valued at 0.10 ("bedroom, fully
-   seen, no toilet") and kept in the order for one more loop point (Hanson
-   action 150). Withheld rooms keep the oracle's own probability for the
-   record and the HUD but are not offered; when nothing is left to offer
-   and no staircase is a node, no model call is made and the exploration
-   fallback carries the search. `LoopSettings.min_prob` (0.05) keeps the
-   oracle's "1" for a bedroom in a search for a couch out of the order.
+   storey is covered, and records why (`excluded` in the events, estimates
+   and HUD). Withheld rooms keep the oracle's own probability for the record
+   and the HUD but are not offered; when nothing is left to offer and no
+   staircase is a node, no model call is made and the exploration fallback
+   carries the search. `LoopSettings.min_prob` (0.05) keeps the oracle's
+   "1" for a bedroom in a search for a couch out of the order. Until
+   2026-11-12 the method also excluded rooms by a hand-written room-type
+   table, made a one-object label strong and flagged "home objects"; all of
+   that was removed (no hand-written knowledge about rooms and objects).
 
    **Two more ways a room is finished** (`core/planning/object_search/rooms/room_scans.py`, since
    2026-10-05), both for a room with **no live frontier** -- no accessible

@@ -15,6 +15,7 @@ from sparx_agency.core.planning.objnav.camera_geometry import world_T_camera_opt
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.evaluation import run_evaluation
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.trace_tools.agreement import agreeing
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.trace_tools.closing_log import closing_row, worth_logging
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.protocol import protocol_for
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.hm3d.run import parser, prepare
 
@@ -96,7 +97,11 @@ class Tracer:
 
         def plan(observation):
             self.state["obs"], self.state["pose"] = observation, pose_dict(observation.pose)
-            return original_plan(observation)
+            command = original_plan(observation)
+            row = closing_row(self.policy, observation)
+            if worth_logging(row):
+                self.write("closing", **row)
+            return command
 
         def detect(rgb):
             self._hook_graph()

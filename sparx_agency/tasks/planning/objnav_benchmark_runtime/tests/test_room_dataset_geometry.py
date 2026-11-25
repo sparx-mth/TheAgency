@@ -1,0 +1,193 @@
+import numpy as np
+import pytest
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import (
+    UNASSIGNED, assign_cells, compass_yaws, spread_points)
+
+
+def objects(*rows):
+    return [{"region": region, "center": (x, 1.0, z)} for region, x, z in rows]
+
+
+def test_a_cell_takes_the_region_of_the_objects_around_it():
+    cells = np.array([[0.2, 0.0, 0.0], [10.2, 0.0, 0.0]])
+    found = assign_cells(cells, objects((1, 0, 0), (1, 0.5, 0), (1, 0, 0.5), (2, 10, 0), (2, 10.5, 0), (2, 10, 0.5)), max_gap_m=2.0)
+    assert list(found) == [1, 2]
+
+
+def test_a_cell_far_from_every_object_belongs_to_no_region():
+    found = assign_cells(np.array([[50.0, 0.0, 50.0]]), objects((1, 0, 0), (1, 1, 0), (1, 0, 1)), max_gap_m=2.0)
+    assert list(found) == [UNASSIGNED]
+
+
+def test_objects_on_another_floor_do_not_count():
+    upstairs = [{"region": 3, "center": (0.0, 4.5, 0.0)}] * 3
+    assert list(assign_cells(np.array([[0.0, 0.0, 0.0]]), upstairs, max_gap_m=2.0)) == [UNASSIGNED]
+
+
+def test_the_majority_of_the_nearest_objects_decides():
+    near = objects((1, 0.5, 0), (2, 0.6, 0), (2, 0.7, 0), (1, 5, 0))
+    assert list(assign_cells(np.array([[0.0, 0.0, 0.0]]), near, max_gap_m=2.0)) == [2]
+
+
+def test_spread_points_start_in_the_middle_and_then_go_far_apart():
+    points = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0]])
+    chosen = spread_points(points, 3)
+    assert chosen[0] == 2 and set(chosen[1:]) == {0, 4}
+
+
+def test_spread_points_never_returns_more_than_there_are():
+    assert len(spread_points(np.array([[0.0, 0.0], [1.0, 0.0]]), 5)) == 2
+
+
+@pytest.mark.parametrize("count", [4, 8])
+def test_the_headings_are_evenly_spaced_around_the_circle(count):
+    yaws = compass_yaws(count)
+    assert len(yaws) == count and np.allclose(np.diff(yaws), 2 * np.pi / count)
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import greedy_views, visible_cells
+
+CAMERA = dict(width=64, height=48, hfov_deg=90.0)
+
+
+def seen(depth_m, cells_xz, camera=(0.0, 0.0, 0.0, 0.0)):
+    cells = np.array([[x, 0.0, z] for x, z in cells_xz])
+    return list(visible_cells(np.full((48, 64), depth_m), camera, cells_xyz=cells, **CAMERA))
+
+
+def test_a_floor_cell_ahead_inside_the_view_is_seen():
+    assert seen(5.0, [(0.0, -3.0)]) == [True]
+
+
+def test_cells_behind_or_beside_the_camera_are_not_seen():
+    assert seen(5.0, [(0.0, 3.0), (10.0, -3.0)]) == [False, False]
+
+
+def test_a_cell_behind_a_nearer_surface_is_hidden():
+    assert seen(2.0, [(0.0, -3.0)]) == [False]
+
+
+def test_the_view_turns_with_the_yaw():
+    assert seen(5.0, [(-3.0, 0.0)], camera=(0.0, 0.0, 0.0, np.pi / 2)) == [True]
+
+
+def masks(*seen_sets):
+    return [np.array([i in s for i in range(5)]) for s in seen_sets]
+
+
+def test_greedy_views_take_the_view_that_adds_the_most_unseen_cells_each_time():
+    assert greedy_views(masks({0, 1, 2}, {2, 3}, {0, 1}, {4}), count=3, min_new=1) == [0, 1, 3]
+
+
+def test_greedy_views_stop_when_nothing_new_is_added():
+    assert greedy_views(masks({0, 1}, {0, 1}), count=5, min_new=1) == [0]
+
+
+def test_floor_close_to_the_camera_still_counts_as_in_front_of_it():
+    assert seen(5.0, [(0.0, -0.5)]) == [True]
+
+
+def test_a_view_of_a_wall_a_metre_away_sees_nothing_beyond_it_and_a_long_view_sees_the_room():
+    near, far = np.full((48, 64), 1.0), np.full((48, 64), 6.0)
+    cells = np.array([[0.0, 0.0, -0.5], [0.0, 0.0, -4.0]])
+    assert list(visible_cells(near, (0.0, 0.0, 0.0, 0.0), cells_xyz=cells, **CAMERA)) == [True, False]
+    assert list(visible_cells(far, (0.0, 0.0, 0.0, 0.0), cells_xyz=cells, **CAMERA)) == [True, True]
+
+
+def test_a_pixel_without_depth_blocks_the_view_because_it_is_a_wall_nearer_than_the_sensor_can_see():
+    assert seen(0.0, [(0.0, -3.0)]) == [False]
+    assert seen(np.nan, [(0.0, -3.0)]) == [False]
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import near_share
+
+
+def test_the_near_share_counts_pixels_closer_than_the_limit_and_pixels_without_depth():
+    depth = np.array([[0.5, 3.0], [0.0, np.nan]])
+    assert near_share(depth, near_m=1.0) == 0.75
+    assert near_share(np.full((2, 2), 3.0), near_m=1.0) == 0.0
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import near_room, object_coverage
+
+
+def test_weights_make_a_few_heavy_elements_outweigh_many_light_ones():
+    heavy_first = [np.array([True, False, False, False, False]), np.array([False, True, True, True, True])]
+    weights = np.array([10.0, 1.0, 1.0, 1.0, 1.0])
+    assert greedy_views(heavy_first, count=1, min_new=0.5, weights=weights) == [0]
+
+
+def test_with_a_repeat_credit_views_that_only_re_see_things_still_fill_the_remaining_slots_most_new_first():
+    views = masks({0, 1, 2}, {0, 1}, {0}, {3, 4})
+    assert greedy_views(views, count=4, min_new=0.1, repeat_credit=0.5) == [0, 3, 1, 2]
+
+
+def test_a_view_is_never_picked_twice_even_when_its_repeat_credit_is_the_best_left():
+    assert greedy_views(masks({0, 1}, {0}), count=5, min_new=0.1, repeat_credit=0.5) == [0, 1]
+
+
+def test_one_object_seen_from_two_views_is_one_object_and_a_second_class_at_the_same_place_is_another():
+    chair, same_chair, bed = {"cls": "chair", "point": (1.0, 1.0)}, {"cls": "chair", "point": (1.3, 1.0)}, {"cls": "bed", "point": (1.1, 1.0)}
+    objects, masks_ = object_coverage([[chair], [same_chair, bed], []], radius_m=0.6)
+    assert [o["cls"] for o in objects] == ["chair", "bed"]
+    assert [list(m) for m in masks_] == [[True, False], [True, True], [False, False]]
+
+
+def test_a_point_is_near_the_room_when_a_room_cell_is_within_the_gap():
+    cells = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+    assert near_room((1.3, 0.0), cells, max_gap_m=0.5) and not near_room((3.0, 0.0), cells, max_gap_m=0.5)
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import box_perimeter, wall_hits
+
+
+def test_the_perimeter_runs_along_all_four_edges_at_the_spacing():
+    points = box_perimeter((0.0, 0.0, 2.0, 1.0), spacing_m=0.5)
+    assert len(points) == 12 and (0.0, 0.0) in [tuple(p) for p in points] and (2.0, 1.0) in [tuple(p) for p in points]
+    assert all(p[0] in (0.0, 2.0) or p[1] in (0.0, 1.0) for p in points)
+
+
+def hits(depth_m, perimeter, camera=(0.0, 0.0, 0.0)):
+    return list(wall_hits(np.full((48, 64), depth_m), camera, np.array(perimeter), width=64, hfov_deg=90.0, tolerance_m=0.4))
+
+
+def test_perimeter_points_where_the_depth_rays_end_are_hit():
+    assert hits(3.0, [(0.0, -3.0), (1.0, -3.0)]) == [True, True]
+
+
+def test_points_short_of_beyond_behind_or_beside_the_surface_are_not_hit():
+    assert hits(3.0, [(0.0, -1.0), (0.0, -5.0), (0.0, 3.0), (10.0, -3.0)]) == [False, False, False, False]
+
+
+def test_a_pixel_without_depth_hits_nothing():
+    assert hits(0.0, [(0.0, -3.0)]) == [False]
+    assert hits(np.nan, [(0.0, -3.0)]) == [False]
+
+
+def test_the_view_turns_with_the_yaw_when_hitting_the_perimeter():
+    assert hits(3.0, [(-3.0, 0.0)], camera=(0.0, 0.0, np.pi / 2)) == [True]
+
+
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.room_dataset.geometry import hits_in_room_share
+
+
+def inside_share(depth_m, room_cells, camera=(0.0, 0.0, 0.0)):
+    return hits_in_room_share(np.full((48, 64), depth_m), camera, np.array(room_cells), width=64, hfov_deg=90.0, max_gap_m=1.0)
+
+
+def test_a_view_that_ends_on_surfaces_next_to_room_floor_is_all_in_the_room():
+    assert inside_share(3.0, [(x, -2.5) for x in np.arange(-3.0, 3.1, 0.5)]) == 1.0
+
+
+def test_a_view_that_ends_far_from_any_room_floor_is_not_in_the_room():
+    assert inside_share(3.0, [(0.0, 0.0), (0.5, 0.5)]) == 0.0
+
+
+def test_the_share_is_the_part_of_the_view_whose_hits_are_in_the_room():
+    cells = [(x, -2.5) for x in np.arange(-3.0, -0.9, 0.5)]
+    assert 0.4 < inside_share(3.0, cells) < 0.6
+
+
+def test_a_view_without_any_depth_has_no_hits_in_the_room():
+    assert inside_share(0.0, [(0.0, -2.5)]) == 0.0

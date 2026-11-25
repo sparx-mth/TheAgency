@@ -21,8 +21,6 @@ from sparx_agency.core.planning.exploration.object_search_supervisor import Room
 from sparx_agency.core.planning.objnav.types.actions import DiscreteAction
 from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.core.planning.object_search.exploration.doorway_candidates import PeekSettings
-from sparx_agency.core.mapping.topology.room_priors import (
-    home_object, implausible_room, ruled_out, target_key)
 from sparx_agency.core.planning.object_search.rooms.room_scans import (
     SCAN_POINT_INSIDE, SEEN_FROM_SCAN, RoomScanLedger, visible_fraction)
 from sparx_agency.core.planning.object_search.rooms.room_search_loop import LoopSettings
@@ -315,134 +313,34 @@ def test_the_warmup_scan_finishes_the_spawn_room_before_the_first_room_is_chosen
     assert policy.loop.estimates[0]["entry"] == "excluded"
 
 
-def test_the_type_prior_is_off_by_default_and_the_oracle_sees_every_room_with_its_type():
-    """LLM-first (2026-10-07): a strong bathroom is shown to the oracle as ``type=bathroom`` and valued by
-    the model, not withheld by the table -- which ruled a bedroom out for a toilet when an en-suite is
-    reached through one."""
+def test_the_oracle_sees_every_room_with_its_type():
+    """LLM-first: a bathroom is shown to the oracle as ``type=bathroom`` and valued by the model, never
+    withheld by a table."""
     policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
-    assert not policy.loop.settings.type_prior and LoopSettings().type_prior is False
     see(policy, {1: ["toilet", "sink"]}, step=0)
     policy.graph.relabel(1, 0)
-    assert policy.graph.label_info(1)["strength"] == "strong"
     command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._excluded == {} and policy.loop.stats["excluded_type"] == 0
+    assert policy.loop._excluded == {}
     assert policy.reasoned_with[-1]["exclude"] == ()
     assert policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1", "the stub oracle still values it"
     assert policy.loop.estimates[1]["entry"] == "vantage" and policy.loop.estimates[1]["label"] == "bathroom"
 
 
-def test_a_room_whose_type_cannot_hold_the_target_is_not_a_node_unless_the_target_was_seen_in_it():
-    """The type prior switched on (``type_prior=True``): the hard version of the rule."""
-    llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=llm, type_prior=True)
-    assert policy.target.query == "chair" and target_key(policy.target) == "chair"
-    see(policy, {1: ["toilet", "sink"]}, step=0)                     # two kinds of object: a STRONG bathroom
-    policy.graph.relabel(1, 0)
-    assert policy.graph.label_info(1)["label"] == "bathroom" and policy.graph.label_info(1)["strength"] == "strong"
-    command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._excluded == {1: "type:bathroom"} and policy.loop.stats["excluded_type"] == 1
-    assert policy.supervisor.room_id == 0, "a chair is not searched for in a bathroom"
-    assert command.info["kind"] in ("vantage", "room_scan"), "... and the agent already stands in room A, so its visit begins"
-    assert policy.loop.estimates[1]["excluded"] == "type:bathroom"
-    assert policy.reasoned_with[-1]["exclude"] == (), "shown to the oracle all the same: the big picture"
-    # A chair confirmed in the bathroom outranks the prior.
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
-    see(policy, {1: ["toilet", "sink", "chair"]}, step=0)
-    policy.graph.relabel(1, 0)
-    assert policy.graph.label_info(1)["label"] == "bathroom"
-    command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._excluded == {} and policy.supervisor.room_id == 1
-    # A weak label -- one kind of object that names no room on its own -- is the oracle's to value,
-    # never an exclusion (2026-10-05): a sink alone may be a kitchen's.
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
-    see(policy, {1: ["sink"]}, step=0)
-    policy.graph.relabel(1, 0)
-    assert policy.graph.label_info(1)["strength"] == "weak"
-    policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._excluded == {} and policy.loop.stats["weak_type_kept"] == 1
-    # One SIGNATURE object names its room on its own (2026-10-05): a toilet is a bathroom, and the
-    # bathroom is ruled out for a chair with no second kind of object needed.
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
-    see(policy, {1: ["toilet"]}, step=0)
-    policy.graph.relabel(1, 0)
-    assert policy.graph.label_info(1)["strength"] == "strong" and policy.graph.label_info(1)["signature"]
-    policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._excluded == {1: "type:bathroom"} and policy.supervisor.room_id == 0
-    assert ruled_out(policy.target, "bathroom", "weak", ["sink"]) is None
-    assert ruled_out(policy.target, "bathroom", "strong", ["toilet", "sink"]) == "type:bathroom"
-    assert ruled_out(policy.target, "bathroom", "strong", ["toilet", "sink", "chair"]) is None, "the target itself"
-    assert ruled_out(policy.target, "bathroom", "strong", ["toilet", "sink", "desk"]) is None, "a desk is where chairs live"
-    assert home_object("toilet", "sink") and home_object("toilet", "shower") and not home_object("toilet", "sofa")
-
-
-def test_the_type_prior_table_is_exclusions_not_permissions():
-    assert implausible_room("sofa", "bedroom") and implausible_room("couch", "kitchen")
-    assert not implausible_room("sofa", "hallway"), "a hallway leads on"
-    assert not implausible_room("sofa", "unknown") and not implausible_room("sofa", None)
-    assert implausible_room("toilet", "bedroom") and not implausible_room("toilet", "bathroom")
-    assert not implausible_room("frying pan", "bathroom"), "a target the table does not know is never excluded"
-    assert target_key("tv") == "television" and target_key("plant") == "potted plant"
-
-
-def test_a_room_holding_a_home_object_of_the_target_is_not_finished_by_sight_from_outside():
-    """Allensville toilet run, step 26: the warm-up spin at the spawn point saw more than half of the
-    bathroom's floor through its door (``seen_from_scan``), finished it with the bathtub inside and the
-    toilet behind the jamb, and the strong bathroom read 0 for the toilet while twenty openings were
-    peeked. A scan the agent STOOD in still finishes it."""
+def test_a_room_finished_by_sight_from_outside_stays_finished_whatever_it_holds():
+    """A bathtub in a room seen from its door does not reopen it for a toilet: no object class is a
+    hand-written home of any target."""
     from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
-    from sparx_agency.core.planning.object_search.rooms.room_scans import SEEN_THROUGH
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
-    policy.target = gibson_label_mapper().target_labels("toilet")
-    see(policy, {1: ["bathtub"]}, step=0)
-    policy.scans.mark(1, SEEN_FROM_SCAN)
-    policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert 1 not in policy.loop._excluded, "a bathtub is where a toilet lives: the room stays a node"
-    kept = [e for e in policy.loop.events if e["event"] == "home_object_kept" and "scanned" in e]
-    assert policy.loop.stats["home_object_kept"] >= 1 and len(kept) == 1
-    assert kept[0]["scanned"] == SEEN_FROM_SCAN and kept[0]["home_objects"] == ["bathtub"]
-    assert policy.loop.estimates[1]["entry"] != "excluded", "... and it is offered to the solver"
-    # Looked into with no frontier left: the same guard.
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
-    policy.target = gibson_label_mapper().target_labels("toilet")
-    see(policy, {1: ["sink"]}, step=0)
-    policy.scans.mark(1, SEEN_THROUGH)
-    policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert 1 not in policy.loop._excluded
-    # Stood in and turned a full circle: finished, bathtub or not.
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
-    policy.target = gibson_label_mapper().target_labels("toilet")
-    see(policy, {1: ["bathtub"]}, step=0)
-    policy.scans.mark(1, SCAN_POINT_INSIDE)
-    policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._excluded == {1: "scanned:" + SCAN_POINT_INSIDE} and policy.loop.stats["home_object_kept"] == 0
-    # A room with no home object seen from outside is finished, as before.
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
-    policy.target = gibson_label_mapper().target_labels("toilet")
-    see(policy, {1: ["coat rack"]}, step=0)
-    policy.scans.mark(1, SEEN_FROM_SCAN)
-    policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert policy.loop._excluded == {1: "scanned:" + SEEN_FROM_SCAN}
-    assert LoopSettings().home_floor == 0.0, "LLM-first: the model values the bathtub's room itself"
+    for verdict, objects in ((SEEN_FROM_SCAN, ["bathtub"]), (SEEN_FROM_SCAN, ["coat rack"]), (SCAN_POINT_INSIDE, ["bathtub"])):
+        policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM())
+        policy.target = gibson_label_mapper().target_labels("toilet")
+        see(policy, {1: objects}, step=0)
+        policy.scans.mark(1, verdict)
+        policy.loop.plan(obs_at(episode, 0, IN_A), world)
+        assert policy.loop._excluded == {1: "scanned:" + verdict}
+        assert not [e for e in policy.loop.events if e["event"] == "home_object_kept"]
+    assert LoopSettings().home_floor == 0.0
     with pytest.raises(ValueError):
         LoopSettings(home_floor=1.0)
-
-
-def test_a_room_whose_evidence_rules_it_out_on_this_action_is_excluded_on_this_action():
-    """Hanson 2026-10-05, action 150: the bedroom's label became strong at the loop point's own
-    re-classification, AFTER the nodes had been chosen; the oracle was shown it and valued it at 0.10
-    ("bedroom, fully seen, no toilet"), and it stayed in the order until the next loop point. The
-    labels are read from the evidence before the nodes are chosen now."""
-    llm = NamingLLM()
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=llm, type_prior=True)
-    see(policy, {1: ["toilet"]}, step=0)             # the background refresh: evidence recorded, no label yet
-    assert policy.graph.label_info(1) is None
-    command = policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    assert llm.calls == 1, "one classifier call for the one room with a new kind of object"
-    assert policy.graph.label_info(1)["label"] == "bathroom" and policy.graph.label_info(1)["strength"] == "strong"
-    assert policy.loop._excluded == {1: "type:bathroom"}
-    assert policy.reasoned_with[-1]["exclude"] == (), "shown to the oracle with its type; withheld from the solver"
-    assert policy.supervisor.room_id == 0 and command.info["kind"] in ("vantage", "room_scan")
-    assert policy.loop.estimates[1]["excluded"] == "type:bathroom"
 
 
 def test_the_room_in_force_is_never_excluded_mid_visit():
@@ -471,31 +369,7 @@ def test_a_relabel_mid_scan_never_ends_the_visit_under_the_llm_first_default():
     assert policy.loop._needs_reason, "... valued at the loop point"
 
 
-def test_a_relabel_mid_scan_keeps_the_visit_unless_the_new_type_rules_the_room_out():
-    """Upstairs Ranchester: a potted plant renamed the room 'living room' at 180 degrees of its
-    rotation and the turn ended -- half a scan wasted. A toilet, on the other hand, means leave now --
-    with the type prior on."""
-    policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM(), type_prior=True)
-    policy.loop.plan(obs_at(episode, 0, IN_A), world)
-    vantage = policy.route_memory.goal
-    policy.loop.plan(obs_at(episode, 1, vantage), world)
-    assert policy.supervisor.state == SEARCH and policy.loop._scan["phase"] == "rotate"
-    see(policy, {1: ["coat rack"]}, step=2)                          # NamingLLM: a hallway -- fine for a chair
-    command = policy.loop.plan(obs_at(episode, 2, vantage, yaw=0.5), world)
-    assert policy.graph.label_info(1)["label"] == "hallway"
-    assert policy.supervisor.state == SEARCH and policy.supervisor.room_id == 1, "the rotation goes on"
-    assert command.info["kind"] == "room_scan" and policy.loop._needs_reason
-    assert policy.loop.stats["relabels_kept_visit"] == 1 and policy.loop.stats["reclassified_releases"] == 0
-    assert policy.loop.events[-1]["event"] == "relabel_kept_visit"
-    see(policy, {1: ["coat rack", "toilet"]}, step=3)                # ... but a bathroom is no place for a chair
-    command = policy.loop.plan(obs_at(episode, 3, vantage, yaw=1.0), world)
-    assert policy.graph.label_info(1)["label"] == "bathroom"
-    assert policy.supervisor.history[-1][:2] == (1, "reclassified")
-    assert policy.loop._excluded.get(1) == "type:bathroom" and policy.supervisor.room_id == 0
-    assert policy.loop.stats["reclassified_releases"] == 1
-
-
-def test_a_relabel_in_transit_under_scan_keeps_the_transit_unless_ruled_out():
+def test_a_relabel_in_transit_under_scan_keeps_the_transit():
     """The historical rule, behind ``transit_commitment=False`` since 2026-10-22: under the committed-target
     rule no classifier call is spent in transit at all (``test_explore_visit``)."""
     policy, episode, world, rooms, reasoned = scan_policy(order=(1, 0), llm=NamingLLM(), transit_commitment=False)
@@ -505,13 +379,13 @@ def test_a_relabel_in_transit_under_scan_keeps_the_transit_unless_ruled_out():
     command = policy.loop.plan(obs_at(episode, 1, IN_A), world)
     assert policy.graph.label_info(1)["label"] == "bedroom"
     assert policy.supervisor.state == TRANSIT and policy.supervisor.room_id == 1 and command.info["kind"] == "transit/1"
-    assert reasoned == [0], "no loop point mid-transit for a name that does not rule the room out"
+    assert reasoned == [0], "no loop point mid-transit for a new name"
     assert policy.loop.stats["relabels_kept_visit"] == 1
 
 
 # -- the knobs -----------------------------------------------------------------------
 @pytest.mark.parametrize("kwargs", [{"visit": "wander"}, {"scan_approach_steps": 40}, {"vantage_arrival_m": 0.0},
-                                    {"scan_seen_fraction": 0.0}, {"scan_seen_fraction": 1.5}, {"type_prior": 1},
+                                    {"scan_seen_fraction": 0.0}, {"scan_seen_fraction": 1.5},
                                     {"min_prob": 1.0}, {"vantage_min_clearance_m": -1.0}])
 def test_scan_settings_reject_nonsense(kwargs):
     with pytest.raises(ValueError):
@@ -807,7 +681,7 @@ def test_the_house_line_is_the_big_picture_in_the_prompts_words():
     policy.graph.relabel(1, 0)
     policy.graph.last_inside = {0: 3}
     line = house_line(policy.graph, {1: ("full rotation", 4.0)}, 2, 149, 500, frontier_left=True)
-    assert line == ("rooms found: bathroom (scanned), bedroom (entered); every known room identified; "
+    assert line == ("rooms found: bathroom (scanned), bedroom? (entered); every known room identified; "
                     "2 openings not yet looked into; unexplored frontier still reachable; actions used about 125 of 500")
     policy, episode, world, rooms, _ = scan_policy(order=(1, 0))
     line = house_line(policy.graph, {0: ("fragment", None)}, 1, 480, 500, frontier_left=False)

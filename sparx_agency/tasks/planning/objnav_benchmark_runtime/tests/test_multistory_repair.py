@@ -387,16 +387,12 @@ def test_a_footing_sweep_is_a_full_circle_at_a_shallow_pitch_that_the_target_tak
     assert camera.inspection is None
 
 
-def test_distractor_classes_are_in_the_vocabulary_and_never_a_goal_nor_a_home_object():
+def test_distractor_classes_are_in_the_vocabulary_and_and_never_a_goal():
     """Hanson/000001 (2026-10-05): a child's ride-on horse read as 'chair' at 0.9 and the episode
     stopped on it 11.7 m from the nearest chair. An open-vocabulary detector lands on the nearest
     prompt it was given; a toy prompt gives the wrong match somewhere else to go."""
-    from sparx_agency.core.mapping.topology.room_priors import home_object, signature_type
     mapper = gibson_label_mapper()
     vocabulary = set(mapper.vocabulary())
     assert {"toy", "rocking horse", "stuffed animal", "bathtub"} <= vocabulary
     for cls in ("toy", "rocking horse", "stuffed animal"):
         assert all(not mapper.target_labels(c).accepts(cls) for c in ("chair", "couch", "bed", "toilet", "tv", "potted plant"))
-        assert not any(home_object(target, cls) for target in ("chair", "sofa", "bed", "toilet", "television", "potted plant"))
-        assert signature_type(cls) is None
-    assert home_object("toilet", "bathtub") and signature_type("bathtub") == "bathroom"

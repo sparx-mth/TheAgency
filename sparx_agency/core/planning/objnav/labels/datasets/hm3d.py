@@ -39,8 +39,7 @@ CATEGORIES = ("chair", "bed", "plant", "toilet", "tv_monitor", "sofa")
 #: What each category is called when it is put to a language model: the
 #: same words the Gibson table uses (``couch``, ``tv``, ``potted plant``), so
 #: the room LLM and the node oracle are asked the identical question on both
-#: benchmarks and the method's priors (``methods/room_priors.py``, keyed through
-#: the same aliases) resolve the same way.
+#: benchmarks.
 QUERIES = {"chair": "chair", "bed": "bed", "plant": "potted plant",
            "toilet": "toilet", "tv_monitor": "tv", "sofa": "couch"}
 
@@ -67,8 +66,7 @@ PROMPTS = {
 #: crop and lands on the nearest one it was given, so the prompt set is part of
 #: the method -- a different context list is a different detector, and every
 #: difference below is deliberate and HM3D's own. The four door prompts are the
-#: ones ``methods/doors.py`` looks for; ``bathtub`` is a home object of the
-#: toilet (``room_priors.HOME_OBJECTS``); ``toy``, ``rocking horse`` and
+#: ones ``methods/doors.py`` looks for; ``toy``, ``rocking horse`` and
 #: ``stuffed animal`` are the distractors that stop a child's ride-on horse
 #: reading as a chair. ``stool`` and ``bar stool`` (since 2026-10-25) are
 #: HM3D's: its ``chair`` category does not include stools (the counter stool

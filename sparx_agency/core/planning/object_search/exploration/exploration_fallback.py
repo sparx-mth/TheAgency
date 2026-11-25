@@ -27,9 +27,6 @@ raised, it produces a command that MOVES, in this order:
      6 cm of where it started -- while the passage to the stairs stood two
      metres away as a frontier the whole time, outranked because the strips
      were nearer;
-   * a frontier of a room the **target cannot be in** (the loop's
-     ``type:`` exclusion, :mod:`room_priors`): even a large unexplored
-     bathroom is not where a couch is;
    * a **sliver** (since 2026-10-14): a frontier from whose cell a look
      round would reveal less than ``min_gain_m2`` of unknown floor (the
      loop's ``explore_min_gain_m2`` by default) -- the strip beside a wall,

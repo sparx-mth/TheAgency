@@ -177,7 +177,7 @@ class RPTSearchPolicy:
                                 "code_floors": {"unexplored_floor": self.loop_settings.unexplored_floor,
                                                 "unexplored_elsewhere": self.loop_settings.unexplored_elsewhere,
                                                 "home_floor": self.loop_settings.home_floor},
-                                "second_pass": self.loop_settings.second_pass, "type_prior": self.loop_settings.type_prior,
+                                "second_pass": self.loop_settings.second_pass,
                                 "route": "LLM_REASONING_MODEL", "cadence": "loop points and semantic discovery; unchanged prompts reused"},
                 "floor_change_decision": ("RPT* over rooms and stair nodes; a staircase is charged its flight plus "
                                           "%.1f m on every arc; no allowance, no clock; the explicit floor_decision "
@@ -216,11 +216,8 @@ class RPTSearchPolicy:
             return "bounded frontier sweep of %d actions" % loop.local_steps
         finishing = ("finished rooms are shown to the oracle with their status and offered again%s once its pass "
                      "verdict says the home is covered (a revisit scans from a spot at least %.1f m from the earlier "
-                     "scan points); rooms whose STRONG type label cannot hold the target are %s; one signature object "
-                     "(a bed, a toilet, an oven) makes a label strong"
-                     % ("" if loop.second_pass else " (DISABLED: second_pass off)", loop.revisit_standoff_m,
-                        "not nodes (type_prior on)" if loop.type_prior
-                        else "valued by the oracle like every other room (type_prior off)"))
+                     "scan points)"
+                     % ("" if loop.second_pass else " (DISABLED: second_pass off)", loop.revisit_standoff_m))
         if loop.exploring:
             return ("frontier walk: the room's frontier that reveals the most unknown floor per metre walked, then the "
                     "next, until none is left (bounded by %d actions); a room the agent stood in with no live frontier "
