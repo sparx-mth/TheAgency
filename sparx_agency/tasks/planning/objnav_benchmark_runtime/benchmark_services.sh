@@ -146,16 +146,17 @@ sys.exit(not any(m.get("name") == sys.argv[1] and m.get("size_vram", 0) > 0
     if [[ -n "$GPU_PLAN_REPLAY" ]]; then
       [[ -f "$GPU_PLAN_REPLAY" ]] || die "GPU_PLAN_REPLAY names no recorded plan at $GPU_PLAN_REPLAY"
       PLAN_ENV="$("$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan \
-                   --replay "$GPU_PLAN_REPLAY" --format env --write "$SERVICE_DIR/gpu_plan.json")" \
+                   --replay "$GPU_PLAN_REPLAY" --format assignments --write "$SERVICE_DIR/gpu_plan.json")" \
         || die "gpu_plan.py could not replay $GPU_PLAN_REPLAY"
       say "GPU plan replayed from $GPU_PLAN_REPLAY (a resume keeps the devices the run was frozen with)" | tee -a "$LOG"
     else
       PLAN_ENV="$("$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.gpu_plan \
-                   --gpu-device "$GPU_DEVICE" --format env --write "$SERVICE_DIR/gpu_plan.json")" \
+                   --gpu-device "$GPU_DEVICE" --format assignments --write "$SERVICE_DIR/gpu_plan.json")" \
         || die "gpu_plan.py could not place the processes (nvidia-smi? Ollama manifests under $OLLAMA_MODELS_DIR? set LLM_VRAM_MIB)"
     fi
     OPERATOR_SHARED_GPU="$ALLOW_SHARED_GPU"
-    eval "$PLAN_ENV"                      # sets ALLOW_SHARED_GPU=1 when more than one process (or a desktop) holds the card
+    local assignment
+    while IFS= read -r assignment; do export "$assignment"; done <<< "$PLAN_ENV"
     [[ "$OPERATOR_SHARED_GPU" == 1 ]] && ALLOW_SHARED_GPU=1
     if [[ "$LLM_SERVER_UP" == 1 ]]; then
       export LLM_NUM_GPU=""
@@ -198,9 +199,14 @@ PY
   esac
 
   # -- services ----------------------------------------------------------------------------------
-  STARTED_OLLAMA=0 DETECTOR_PID="" SEGMENTER_PID="" OLLAMA_PID=""
+  STARTED_OLLAMA=0 DETECTOR_PID="" SEGMENTER_PID="" OLLAMA_PID="" RESOURCE_MONITOR_PID=""
   trap objnav_services_cleanup EXIT
   trap 'exit 130' INT TERM
+  if [[ "${OBJNAV_RESOURCE_MONITOR:-0}" == 1 ]]; then
+    "$HAB_PY" -m sparx_agency.tasks.planning.objnav_benchmark_runtime.resource_monitor record \
+      "$SERVICE_DIR/utilization.csv" --interval 15 --gpu-device "$GPU_DEVICE" >> "$SERVICE_DIR/resource_monitor.log" 2>&1 &
+    RESOURCE_MONITOR_PID=$!
+  fi
 
   if [[ "$AGENT" == falcon-yolo ]]; then
     say "LLM: none (--agent falcon-yolo: goal-free FALCON + YOLO + the same closing; Ollama is neither started nor checked)" | tee -a "$LOG"
@@ -317,6 +323,13 @@ objnav_services_cleanup() {
   trap - EXIT
   # The launcher's own processes first (a parallel run's shards): they must not outlive the detector they call.
   if declare -F objnav_launcher_cleanup > /dev/null; then objnav_launcher_cleanup || true; fi
+  if [[ -n "$RESOURCE_MONITOR_PID" ]]; then
+    if ! kill -TERM "$RESOURCE_MONITOR_PID" 2>/dev/null; then
+      say "ERROR: utilization monitor exited early; see $SERVICE_DIR/resource_monitor.log" >&2
+      if [[ "$code" == 0 ]]; then code=1; fi
+    fi
+    wait "$RESOURCE_MONITOR_PID" 2>/dev/null || true
+  fi
   if [[ -n "$DETECTOR_PID" ]]; then kill -TERM "$DETECTOR_PID" 2>/dev/null || true; wait "$DETECTOR_PID" 2>/dev/null || true; fi
   if [[ -n "$SEGMENTER_PID" ]]; then kill -TERM "$SEGMENTER_PID" 2>/dev/null || true; wait "$SEGMENTER_PID" 2>/dev/null || true; fi
   if [[ "$STARTED_OLLAMA" == 1 ]]; then

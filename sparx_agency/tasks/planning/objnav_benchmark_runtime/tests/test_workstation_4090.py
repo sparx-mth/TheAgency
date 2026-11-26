@@ -76,3 +76,35 @@ def test_resume_keeps_actual_concurrency_but_does_not_bypass_headroom(tmp_path):
         ws.campaign_jobs(tmp_path, "mp3d", 2, settings)
     with pytest.raises(ValueError, match="different settings"):
         ws.campaign_jobs(tmp_path, "mp3d", 3, dict(settings, OLLAMA_NUM_PARALLEL="1"))
+
+
+def test_gt_detailed_launch_and_bare_resume_keep_the_sensor_and_logs(tmp_path, monkeypatch):
+    output = tmp_path / "full split"
+    ports, launches = [], []
+    monkeypatch.setenv("DETECTOR_PORT", "11450")
+    monkeypatch.setattr(ws, "require_idle_ports", ports.append)
+    monkeypatch.setattr(ws, "workstation_jobs", lambda profile, ceiling, settings: 3)
+    monkeypatch.setattr(ws.os, "execve", lambda path, argv, env: launches.append((argv, env)))
+    args = ["mp3d", "--run", "--output", str(output)]
+    ws.main(args + ["--gt-detailed"])
+    ws.main(args)
+    assert ports == [(11450,), (11450,)]
+    assert launches[0] == launches[1]
+    argv, env = launches[0]
+    assert argv[argv.index("--perception") + 1] == "ground-truth"
+    assert "--full-records" in argv and "--record-log-only" in argv and "--lean" not in argv
+    assert "--limit" not in argv and argv[argv.index("--shard-episodes") + 1] == "20"
+    assert env["YOLO_VRAM_MIB"] == "0" and env["GPU_PLAN_YOLO"] == "cpu"
+    assert env["OBJNAV_RESOURCE_MONITOR"] == "1" and env["LLM_ANSWERS_REPLAY"] == ""
+    assert env["LLM_ANSWERS_RECORD"] == str(tmp_path / "full split_vlm_answers")
+
+
+def test_fresh_gt_profile_cannot_reuse_an_old_answer_store(tmp_path):
+    output = tmp_path / "campaign"
+    answers = tmp_path / "campaign_vlm_answers"
+    answers.mkdir()
+    (answers / "answers-old.jsonl").touch()
+    settings = ws.profile_environment(ws.PROFILES["mp3d"], 2, 256, 11450, gt_log_root=output)
+    with pytest.raises(ValueError, match="own VLM answer store"):
+        ws.campaign_jobs(output, "mp3d", 4, settings)
+    assert not (output / "workstation_4090.json").exists()

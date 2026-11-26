@@ -224,3 +224,21 @@ def test_a_recorded_plan_is_replayed_as_the_environment_it_emitted(tmp_path):
         gpu_plan.replay_environment(tmp_path / "bare.json")
     with pytest.raises(RuntimeError):
         gpu_plan.replay_environment(tmp_path / "missing.json")
+
+
+def test_replayed_assignments_round_trip_as_plain_data(tmp_path, capsys):
+    environment = plan(parts(), 0, "card", 24000, 1000).environment()
+    path = tmp_path / "gpu_plan.json"
+    path.write_text(json.dumps({"environment": environment}))
+    assert gpu_plan.main(["--replay", str(path), "--format", "assignments"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert dict(line.split("=", 1) for line in lines) == environment
+
+
+@pytest.mark.parametrize("overrides", [{"UNKNOWN_SETTING": "1"}, {"HABITAT_SOFTWARE_RENDER": "maybe"}])
+def test_replay_refuses_unknown_placement_fields_and_values(tmp_path, overrides):
+    environment = plan(parts(), 0, "card", 24000, 1000).environment()
+    path = tmp_path / "gpu_plan.json"
+    path.write_text(json.dumps({"environment": dict(environment, **overrides)}))
+    with pytest.raises(RuntimeError, match="environment"):
+        gpu_plan.replay_environment(path)

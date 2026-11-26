@@ -50,6 +50,7 @@ from dataclasses import asdict, dataclass, field
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -77,6 +78,12 @@ PARTIAL_FRACTION = 0.5           # an LLM whose estimate fits at least this far 
 #: What an operator may pin a component to (``GPU_PLAN_<COMPONENT>``); ``auto`` leaves it to the free VRAM.
 PINS = ("auto", "gpu", "cpu")
 COMPONENT_NAMES = ("llm", "yolo", "habitat")
+PLAN_VARIABLES = {
+    "OBJNAV_LLM_DEVICE": "cpu|gpu|gpu-partial", "OBJNAV_YOLO_DEVICE": "cpu|gpu", "OBJNAV_HABITAT_DEVICE": "cpu|gpu",
+    "OLLAMA_CUDA_VISIBLE_DEVICES": "-1|[0-9]+", "LLM_NUM_GPU": "-1|0|",
+    "DETECTOR_DEVICE": "cpu|cuda:0", "DETECTOR_CUDA_VISIBLE_DEVICES": "[0-9]*",
+    "HABITAT_GPU_DEVICE": "[0-9]+", "HABITAT_SOFTWARE_RENDER": "[01]", "ALLOW_SHARED_GPU": "[01]",
+}
 
 
 @dataclass(frozen=True)
@@ -335,9 +342,13 @@ def replay_environment(path: Path) -> Dict[str, str]:
         environment = record["environment"]
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise RuntimeError("%s is not a recorded GPU plan with an environment: %s" % (path, exc))
-    if not isinstance(environment, dict) or not environment:
-        raise RuntimeError("%s records no environment to replay" % path)
-    return {str(key): str(value) for key, value in environment.items()}
+    if not isinstance(environment, dict) or set(environment) != set(PLAN_VARIABLES):
+        raise RuntimeError("%s does not contain the expected GPU environment variables" % path)
+    for key, pattern in PLAN_VARIABLES.items():
+        value = environment[key]
+        if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+            raise RuntimeError("%s records an invalid GPU environment value for %s" % (path, key))
+    return environment
 
 
 def render_env(result: GpuPlan) -> str:
@@ -355,7 +366,7 @@ def _quote(value: str) -> str:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--gpu-device", type=int, default=int(os.environ.get("GPU_DEVICE", "0")))
-    parser.add_argument("--format", choices=("json", "env"), default="json")
+    parser.add_argument("--format", choices=("json", "env", "assignments"), default="json")
     parser.add_argument("--write", type=Path, help="Also write the plan as JSON to this path")
     parser.add_argument("--replay", type=Path, metavar="GPU_PLAN_JSON",
                         help="Do not plan: re-emit the plan this run recorded, so a resume's services start on the "
@@ -366,14 +377,20 @@ def main(argv=None):
         if args.write and args.write.resolve() != args.replay.resolve():
             args.write.parent.mkdir(parents=True, exist_ok=True)
             args.write.write_text(args.replay.read_text())
-        print(render_environment(environment) if args.format == "env" else json.dumps(environment, indent=2))
-        return 0
-    result = plan_from_environment(args.gpu_device)
-    record = dict(asdict(result), environment=result.environment())
-    if args.write:
-        args.write.parent.mkdir(parents=True, exist_ok=True)
-        args.write.write_text(json.dumps(record, indent=2) + "\n")
-    print(render_env(result) if args.format == "env" else json.dumps(record, indent=2))
+        record = environment
+    else:
+        result = plan_from_environment(args.gpu_device)
+        environment = result.environment()
+        record = dict(asdict(result), environment=environment)
+        if args.write:
+            args.write.parent.mkdir(parents=True, exist_ok=True)
+            args.write.write_text(json.dumps(record, indent=2) + "\n")
+    if args.format == "assignments":
+        print("\n".join("%s=%s" % (key, environment[key]) for key in PLAN_VARIABLES))
+    elif args.format == "env":
+        print(render_environment(environment), end="")
+    else:
+        print(json.dumps(record, indent=2))
     return 0
 
 

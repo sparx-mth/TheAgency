@@ -28,7 +28,7 @@ RUNTIME = Path(__file__).resolve().parent
 HOST_HEADROOM_MIB = 16 * 1024  # Model staging, detector and OS in addition to worker RSS.
 
 
-def profile_environment(profile, slots, batch, port):
+def profile_environment(profile, slots, batch, port, *, gt_log_root=None):
     """Settings consumed by benchmark_services.sh, gpu_plan.py and the scene children."""
     env = os.environ
     if (slots > 2 or batch > 256) and not env.get("LLM_VRAM_MIB"):
@@ -49,10 +49,18 @@ def profile_environment(profile, slots, batch, port):
         HABITAT_VRAM_MIB=env.get("HABITAT_VRAM_MIB", str(profile.renderer_mib)),
         HAB_PY=env.get("HAB_PY", str(Path.home() / "miniconda3/envs/objnav-habitat/bin/python")),
     )
-    if any(int(settings[key]) < 1 for key in ("LLM_VRAM_MIB", "YOLO_VRAM_MIB", "HABITAT_VRAM_MIB", "GPU_RESERVE_MIB")):
+    budgets = ["LLM_VRAM_MIB", "HABITAT_VRAM_MIB", "GPU_RESERVE_MIB"]
+    if gt_log_root is not None:
+        settings.update(PERCEPTION="ground-truth", GPU_PLAN_YOLO="cpu", YOLO_VRAM_MIB="0",
+                        OBJNAV_RESOURCE_MONITOR="1", LLM_ANSWERS_RECORD=str(gt_log_root.parent / (gt_log_root.name + "_vlm_answers")))
+        for key in ("DETECTOR_HOST", "DETECTOR_PORT", "DETECTOR_THREADS"):
+            del settings[key]
+    else:
+        budgets.append("YOLO_VRAM_MIB")
+        if not 1 <= int(settings["DETECTOR_PORT"]) <= 65535 or int(settings["DETECTOR_PORT"]) == port:
+            raise ValueError("DETECTOR_PORT must be a valid port distinct from the Ollama port")
+    if any(int(settings[key]) < 1 for key in budgets):
         raise ValueError("VRAM budgets and reserve must be positive MiB")
-    if not 1 <= int(settings["DETECTOR_PORT"]) <= 65535 or int(settings["DETECTOR_PORT"]) == port:
-        raise ValueError("DETECTOR_PORT must be a valid port distinct from the Ollama port")
     return settings
 
 
@@ -74,14 +82,23 @@ def workstation_jobs(profile, ceiling, settings):
                        free_vram_mib=free, renderer_mib=renderer, reserve_mib=reserve)
 
 
+def recorded_profile(output):
+    """Read the profile without admitting workers or touching either service port."""
+    path = output / "workstation_4090.json"
+    if not path.is_file():
+        return None
+    record = json.loads(path.read_text())
+    if not isinstance(record, dict) or type(record.get("jobs")) is not int or not isinstance(record.get("settings"), dict):
+        raise ValueError(f"{path} is not a valid workstation profile")
+    return record
+
+
 def campaign_jobs(output, dataset, jobs, settings):
     """Persist the admitted concurrency. Don't mix runs with different server settings or replay an unsafe plan."""
     output.mkdir(parents=True, exist_ok=True)
     path = output / "workstation_4090.json"
-    if path.is_file():
-        record = json.loads(path.read_text())
-        if not isinstance(record, dict) or type(record.get("jobs")) is not int:
-            raise ValueError(f"{path} is not a valid workstation profile")
+    record = recorded_profile(output)
+    if record is not None:
         if record.get("dataset") != dataset or record.get("settings") != settings:
             raise ValueError(f"{path} has different settings; use the original profile or a fresh --output")
         original = record["jobs"]
@@ -90,6 +107,9 @@ def campaign_jobs(output, dataset, jobs, settings):
         return original
     if any(output.iterdir()):
         raise ValueError(f"{output} is not empty and has no workstation profile; choose a fresh --output")
+    answers = settings.get("LLM_ANSWERS_RECORD")
+    if answers and Path(answers).exists() and any(Path(answers).iterdir()):
+        raise ValueError(f"{answers} already contains data; a fresh benchmark needs its own VLM answer store")
     with path.open("x") as stream:
         json.dump({"dataset": dataset, "jobs": jobs, "settings": settings}, stream, indent=2)
         stream.write("\n")
@@ -113,6 +133,9 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="print the profile only (default); no hardware probes")
     mode.add_argument("--run", action="store_true", help="on the PC only: check resources and start the real benchmark")
+    parser.add_argument("--gt-detailed", action="store_true",
+                        help="use simulator ground truth only; record full episode diagnostics, steps, trajectories, "
+                             "VLM answers and utilization, without video (remembered on resume)")
     parser.add_argument("--jobs", type=int, help="worker ceiling (default: 7 HM3D scenes or 4 MP3D shards)")
     parser.add_argument("--slots", type=int, default=os.environ.get("OLLAMA_NUM_PARALLEL", "2"), help="Ollama request slots")
     parser.add_argument("--batch", type=int, default=os.environ.get("LLM_NUM_BATCH", "256"), help="Ollama prefill tokens")
@@ -127,13 +150,15 @@ def main(argv=None):
         parser.error("HM3D v1 val has only 20 scene workers")
     output = (args.output or Path(os.environ.get("RUNS_ROOT", "runs")) / f"{dataset}_v1_val_4090").expanduser().absolute()
     try:
-        settings = profile_environment(profile, args.slots, args.batch, args.llm_port)
+        record = recorded_profile(output)
+        gt = args.gt_detailed or (record is not None and record["settings"].get("PERCEPTION") == "ground-truth")
+        settings = profile_environment(profile, args.slots, args.batch, args.llm_port, gt_log_root=output if gt else None)
         if dataset == "mp3d":
             settings["VRAM_CAP"] = "0.88"
         jobs = ceiling
         if args.run:
             jobs = workstation_jobs(profile, ceiling, settings)
-            require_idle_ports((args.llm_port, int(settings["DETECTOR_PORT"])))
+            require_idle_ports((args.llm_port,) if gt else (args.llm_port, int(settings["DETECTOR_PORT"])))
             jobs = campaign_jobs(output, dataset, jobs, settings)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
@@ -141,7 +166,9 @@ def main(argv=None):
     settings["GPU_PLAN_REPLAY"] = str(plan) if args.run and plan.is_file() else ""
     settings["HABITAT_RENDERERS"] = str(jobs)
     command = [str(RUNTIME / dataset / "run_benchmark.sh"), "--version", "v1", "--agent", "rpt",
-               "--perception", "service", "--jobs", str(jobs), "--output", str(output)]
+               "--perception", "ground-truth" if gt else "service", "--jobs", str(jobs), "--output", str(output)]
+    if gt:
+        command.extend(["--full-records", "--record-log-only"])
     if dataset == "mp3d":
         command += ["--shard-episodes", "20", "--llm-servers", "1"]
     print(f"{dataset.upper()} v1 val: {profile.episodes} episodes | workers {jobs} (ceiling {ceiling}) | "

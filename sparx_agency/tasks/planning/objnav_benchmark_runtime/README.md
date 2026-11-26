@@ -47,7 +47,7 @@ This is an experimental multi-story algorithm, **not a claim of solved navigatio
 
 ## Full HM3D and MP3D validation on one RTX 4090
 
-These launchers run the standard visual `rpt` agent with YOLO-World, lean episode records and no video. They use
+By default these launchers run the visual `rpt` agent with YOLO-World, lean episode records and no video. They use
 the published splits without sampling or repeating episodes:
 
 | Launcher | Split | Worker ceiling | Budget per worker (VRAM / host RAM) |
@@ -95,6 +95,20 @@ Use a fresh `--output` for changed settings.
 Results go to `runs/{hm3d,mp3d}_v1_val_4090/` by default (`RUNS_ROOT` or `--output` to relocate). Rerun the **same**
 command to resume. See `run.log` for progress, `workstation_4090.json` for the admitted worker count and server
 settings, `gpu_plan.json` for placement, and `campaign_summary.json` for the episode count, `complete`, SR and SPL.
+
+**GT-only validation with detailed records:** preview `mp3d/run_4090.sh --gt-detailed --dry-run`.
+On the dedicated workstation, start a fresh campaign with `mp3d/run_4090.sh --gt-detailed --run`.
+The launcher checks only the VLM port and budgets no detector. The simulator supplies ground-truth boxes and masks;
+these scores are an upper bound under ideal perception, not results under learned perception. A bare `--run`
+on the same output resumes its recorded mode. It does not convert an existing YOLO campaign to GT.
+
+Under `runs/mp3d_v1_val_4090/`, each `<scene>/shard_<n>/episodes.jsonl` holds the full policy report, including
+frontier node probabilities, selected frame names and fallback diagnostics. Each shard's `recordings/` holds
+per-episode steps, trajectories and metrics without video. The sibling `runs/mp3d_v1_val_4090_vlm_answers/`
+stores episode-scoped VLM prompts, image digests and replies outside the scene aggregator. `utilization.csv`
+in the campaign root appends GPU compute, VRAM, host usage and worker counts every 15 seconds. Inspect
+`campaign_heartbeat.jsonl` and the shard console logs for stalled workers; neither a dry run nor a profile
+file is evidence of completed episodes.
 
 ## The agent is given no scene geometry
 Since 2026-11-15 nothing of the simulator's scene geometry crosses the agent
