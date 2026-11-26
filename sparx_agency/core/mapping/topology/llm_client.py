@@ -165,6 +165,7 @@ class LLMConfig:
     num_gpu: Optional[int] = None
     num_ctx: Optional[int] = None
     num_batch: Optional[int] = None   # Ollama prefill tokens per batch, not concurrent requests
+    vision_think: Optional[bool] = None  # Ollama image requests only; None preserves the model default.
 
     def __post_init__(self) -> None:
         if not str(self.reasoning_model).strip():
@@ -188,8 +189,12 @@ class LLMConfig:
         batch = get("LLM_NUM_BATCH", "256" if vision else "").strip()
         timeout = float(get("LLM_TIMEOUT_S", "120" if vision else "30"))
         tokens = int(get("LLM_MAX_TOKENS", "32" if vision else "768"))
+        backend = get("LLM_BACKEND", "ollama").strip().lower()
+        think = get("LLM_VISION_THINK", "").strip() if vision and backend == "ollama" else ""
+        if think not in ("", "0", "1"):
+            raise ValueError("LLM_VISION_THINK must be unset, 0 or 1")
         return cls(
-            backend=get("LLM_BACKEND", "ollama").strip().lower(),
+            backend=backend,
             base_url=get("LLM_BASE_URL", "http://localhost:11434").rstrip("/"),
             model=model,
             api_key=get("LLM_API_KEY", ""),
@@ -204,6 +209,7 @@ class LLMConfig:
             reasoning_num_ctx=int(ctx or "4096") if vision else int(get("LLM_REASONING_NUM_CTX", "8192")),
             num_gpu=int(get("LLM_NUM_GPU", "").strip()) if get("LLM_NUM_GPU", "").strip() else None,
             num_ctx=int(ctx) if ctx else None, num_batch=int(batch) if batch else None,
+            vision_think=None if not think else think == "1",
         )
 
     def models(self) -> Tuple[str, ...]:
@@ -283,13 +289,16 @@ class LLMClient:
         key = entry = None
         if self.answers is not None:
             digest = hashlib.sha256(image_jpeg).hexdigest() if image_jpeg is not None else None
+            think = self.cfg.vision_think if ollama and digest is not None else None
             key = request_key(self.cfg.backend, route.model, system, user, t, self.cfg.seed if ollama else None,
                               route.num_ctx if ollama else None, route.max_tokens, scope=self.answers.scope,
-                              image_sha256=digest)
+                              image_sha256=digest, think=think)
             entry = {"route": "reasoning" if reasoning else "default", "model": route.model, "system": system,
                      "user": user}
             if digest is not None:
                 entry["image_sha256"] = digest
+            if think is not None:
+                entry["think"] = think
             stored = self.answers.get(key)
             if stored is not None:
                 self.answers.put(key, stored, dict(entry, source="replay"))
@@ -355,6 +364,8 @@ class LLMClient:
         }
         if image is not None:
             payload["messages"][1]["images"] = [image]
+            if self.cfg.vision_think is not None:
+                payload["think"] = self.cfg.vision_think
         if self.exclusive is not None:
             with self.exclusive.held():
                 self.exclusive.unload(self.sess, self.cfg.base_url, route.model)

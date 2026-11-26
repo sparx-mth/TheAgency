@@ -105,6 +105,15 @@ def test_an_unusable_visual_reply_cannot_poison_retries_for_the_same_pixels(tmp_
     assert client.chat_json("s", "u", image_jpeg=b"same") == {"p": 0.5}
 
 
+def test_image_thinking_override_does_not_replay_default_answers(tmp_path):
+    client = _client(['{"p":0.1}', '{"p":0.2}'], LLMAnswerStore(record_dir=tmp_path))
+    assert client.chat_json("s", "u", image_jpeg=b"same") == {"p": 0.1}
+    client.cfg.vision_think = False
+    assert client.chat_json("s", "u", image_jpeg=b"same") == {"p": 0.2}
+    assert client.chat_json("s", "u", image_jpeg=b"same") == {"p": 0.2}
+    assert len(client.sess.payloads) == 2
+
+
 def test_a_resumed_run_keeps_its_answers_and_does_not_record_them_twice(tmp_path):
     _client(['{"a": 1}'], LLMAnswerStore(record_dir=tmp_path)).chat_json("s", "u")
     again = _client([], LLMAnswerStore(record_dir=tmp_path))

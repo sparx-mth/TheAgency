@@ -114,7 +114,11 @@ decides whether to keep a stale label — nothing is cached on failure.
 
 - `llm_client.py` — Ollama / OpenAI-compatible HTTP client, plus
   `coerce_bool()` (never `bool()`: a small model answers with the word
-  quoted, and `bool("false")` is True). Two optional attachments, both off
+  quoted, and `bool("false")` is True). For vision-configured Ollama clients,
+  `LLM_VISION_THINK=0` requests a direct image answer, `1` requests reasoning,
+  and unset preserves the server default. An explicit setting is part of the
+  image replay key; text requests and OpenAI-compatible clients are unchanged.
+  Two optional attachments, both off
   unless a run names them:
   - `llm_answer_cache.py` — `LLMAnswerStore`, answers keyed on the exact
     request (backend, model, both prompts, temperature, seed, window, reply

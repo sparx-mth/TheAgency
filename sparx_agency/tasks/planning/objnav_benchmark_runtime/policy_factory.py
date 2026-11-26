@@ -235,6 +235,8 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
     if config is not None:
         llm_config = asdict(config)
         llm_config.pop("api_key", None)
+        if llm_config.get("vision_think") is None:
+            llm_config.pop("vision_think", None)  # unchanged frozen configuration on resume
         identity = identities["VLM" if visual else "LLM"]
         info.update(llm=llm_config, llm_identity=identity)
         if visual:
