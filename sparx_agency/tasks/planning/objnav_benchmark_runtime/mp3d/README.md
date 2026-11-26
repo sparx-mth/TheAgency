@@ -154,6 +154,22 @@ Without the launcher, `mp3d.run` is the CLI (`--help`): `--episodes-dir`,
 (`--agent`, `--explorer`, `--policy-config`, `--segmentation`) are the shared
 ones.
 
+**Strict standard inputs (use for FIX2).** Run both comparison arms with
+`mp3d.run --standard-inputs --perception service --detector-backend grounding_dino`.
+Use the Python entrypoint, not `run_benchmark.sh`: the latter provisions YOLO
+or the simulator oracle. Start the existing [detector service](../../../mapping/scene_graph/serve/README.md)
+with `--backend grounding_dino`, the arm's `--print-vocabulary`, and pass its
+port via `--detector-url`. A mismatched backend fails preflight; there is no
+YOLO or oracle fallback.
+
+The policy and action converter see RGB, clipped depth, the goal category,
+start-relative 2-D GPS and compass. Camera tilt follows LOOK actions. Height
+starts at zero; translated forward steps align consecutive RGB-D frames at
+the measured planar poses. Ambiguous or unmeasured strides add no height
+(`rgbd_height` counts them). Raw depth holes are not filled before clipping.
+Only the evaluator sees world altitude, real episode identity and goal
+viewpoints for scoring. Answer replay and world-frame recordings are refused.
+
 ## 3. The full published validation split
 
 ```bash

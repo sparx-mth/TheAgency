@@ -8,7 +8,7 @@ contract. No navigation, frontier, camera-control or STOP algorithm is replaced.
 YOLO S/L remain explicit checkpoint overrides. The default change does not
 change confidence thresholds or add fusion/reasoning from the reviewed papers.
 
-For ObjectNav `--agent rpt`, YOLO-World also exposes `POST /detect/scoped`:
+For ObjectNav `--agent rpt`, YOLO-World and standalone Grounding DINO expose `POST /detect/scoped`:
 the JPEG body is unchanged, and `X-Detection-Classes` is a JSON list drawn
 from the server's configured classes. Prompt selection, inference and the
 class echo are serialized together, so parallel episodes cannot exchange

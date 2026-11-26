@@ -11,8 +11,11 @@ from sparx_agency.core.common.types.perception import Detection2D
 from sparx_agency.core.mapping.topology.llm_client import LLMClient
 from sparx_agency.core.planning.object_search.perception.target_prompts import target_stair_prompts
 from sparx_agency.core.planning.objnav.labels.datasets.gibson import gibson_label_mapper
+from sparx_agency.core.planning.objnav.relative_height import RelativeHeight
+from sparx_agency.core.planning.objnav.types.pose import AgentPose
 from sparx_agency.tasks.mapping.scene_graph.serve.detection_server import _ServerContext, _make_server
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.evaluation import run_evaluation
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.standard_inputs import STANDARD_INPUTS
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import build_policy, detector_vocabulary
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import model_provenance, model_report_rows
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.services.http_detector import HttpDetector
@@ -41,9 +44,9 @@ class PromptedDetector:
 
 
 @contextmanager
-def detector_server(vocabulary):
+def detector_server(vocabulary, backend="yolo_world"):
     detector = PromptedDetector(vocabulary)
-    metadata = {"backend": "yolo_world", "checkpoint_sha256": "fixture", "detector_config": {"conf_thresh": 0.05}}
+    metadata = {"backend": backend, "checkpoint_sha256": "fixture", "detector_config": {"conf_thresh": 0.05}}
     server = _make_server(_ServerContext(detector, "fixture", "cpu", vocabulary, metadata), "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -81,8 +84,8 @@ class ModelSession:
         return Response({"message": {"content": json.dumps(reply)}})
 
 
-@pytest.mark.parametrize("agent", ["rpt", "rpt_room_llm"])
-def test_both_factory_variants_finish_the_same_episodes(agent, monkeypatch, tmp_path):
+@pytest.mark.parametrize("agent,strict", [("rpt", True), ("rpt", False), ("rpt_room_llm", False)])
+def test_both_factory_variants_finish_the_same_episodes(agent, strict, monkeypatch, tmp_path):
     visual = agent == "rpt"
     session = ModelSession(visual)
     init = LLMClient.__init__
@@ -99,17 +102,26 @@ def test_both_factory_variants_finish_the_same_episodes(agent, monkeypatch, tmp_
         monkeypatch.delenv(name, raising=False)
     mapper, env = gibson_label_mapper(), building(episodes=2)
     vocab = detector_vocabulary(agent, mapper)
-    with detector_server(vocab) as (engine, url):
-        p, method = build_policy(arguments(agent=agent, detector_url=url, perception="service"), mapper,
+    backend = "grounding_dino" if strict else "yolo_world"
+    with detector_server(vocab, backend) as (engine, url):
+        p, method = build_policy(arguments(agent=agent, detector_url=url, perception="service",
+                                           standard_inputs=strict, detector_backend=backend), mapper,
                                  defaults={"map_size_m": 20.0})
         assert method["pipeline_variant"] == agent
         report = "\n".join(model_report_rows(model_provenance(method)))
         assert (("frontier VLM" in report) == visual) and (("LLM, room labels" in report) != visual)
         session.calls.clear()  # the assertions below are on episode decisions, not preflight
-        summary = run_evaluation(env, p, mapper, output=tmp_path, config={"method": method})
+        config = {"method": method}
+        if strict:
+            config["policy_inputs"] = STANDARD_INPUTS
+        summary = run_evaluation(env, p, mapper, output=tmp_path, config=config)
     rows = [json.loads(line) for line in (tmp_path / "episodes.jsonl").read_text().splitlines()]
     assert len(rows) == summary.overall.n_episodes == 2 and all(row["agent_error"] is None for row in rows)
     assert json.loads((tmp_path / "run.json").read_text())["config"]["method"]["pipeline_variant"] == agent
+    if strict:
+        assert p.episode.episode_id not in {row["episode_id"] for row in rows}
+        assert not p.episode.metadata and p.frame_log.records["step_000000.jpg"].pose == AgentPose(0, 0)
+        assert all(row["agent_info"]["rgbd_height"]["estimator"] == RelativeHeight.NAME for row in rows)
     for row in rows:
         info = row["agent_info"]["policy"]
         assert info["pipeline_variant"] == agent and info["plan_calls"] > 0

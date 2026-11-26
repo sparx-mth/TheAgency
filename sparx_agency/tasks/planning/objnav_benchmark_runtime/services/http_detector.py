@@ -49,7 +49,7 @@ class HttpDetector:
         if not data.get("ok") or tuple(data.get("classes", ())) != self.vocabulary:
             raise ObjNavInternalError("Detector vocabulary mismatch; configure a dedicated service with the benchmark's --print-vocabulary output, in that exact order")
         if self.episode_scoped and data.get("scoped_prompts") is not True:
-            raise ObjNavInternalError("Visual RPT requires a YOLO-World server with request-scoped prompts")
+            raise ObjNavInternalError("Visual RPT requires a detector with request-scoped prompts")
         metadata = data.get("metadata", {})
         if self.expected_backend is not None and metadata.get("backend") != self.expected_backend:
             raise ObjNavInternalError("Detector backend differs from the explicitly requested backend")

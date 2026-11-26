@@ -20,8 +20,9 @@ VLM = "frontier_vlm"
 class FrontierSearch:
     """Observe and score even when another behavior owns motion. Only ``plan`` may issue a command."""
 
-    def __init__(self, policy):
+    def __init__(self, policy, *, first_frame=0, prior_calls=0):
         self.policy = policy
+        self.first_frame = first_frame
         self.registry = NodeSettings().registry()
         self.ledger = ScoreLedger()
         self.scores = {}
@@ -29,7 +30,7 @@ class FrontierSearch:
         self.blocked_cells = set()
         self.current = None
         self.order = []
-        self.calls = 0
+        self.calls = prior_calls
         self.inventory = None
         self.inventory_step = -1
 
@@ -59,7 +60,10 @@ class FrontierSearch:
         pending = [self.nodes[i] for i in self.ledger.pending()]
         if not pending or p.fallback.service_unavailable(VLM, obs.step):
             return
-        views = select_views(world, pending, p.frame_log.records, obs.camera,
+        frames = p.frame_log.records
+        if self.first_frame:
+            frames = (record for record in frames.values() if record.step >= self.first_frame)
+        views = select_views(world, pending, frames, obs.camera,
                              settled=p.sight.resolved(world), reference_z=obs.pose.z)
         for i in self.ledger.due(views):
             chosen = views[i]

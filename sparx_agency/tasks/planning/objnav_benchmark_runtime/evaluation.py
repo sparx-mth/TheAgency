@@ -13,6 +13,8 @@ from sparx_agency.tasks.planning.objnav_benchmark.kinematics import KinematicTol
 from sparx_agency.tasks.planning.objnav_benchmark.logger import MetricsLogger
 from sparx_agency.tasks.planning.objnav_benchmark.results_io import strict_json
 from sparx_agency.tasks.planning.objnav_benchmark.runner import run_benchmark
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.standard_inputs import (
+    StandardInputAgent, uses_standard_inputs)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (
     check_frozen_configuration, select_episodes, source_fingerprint,
 )
@@ -98,6 +100,7 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
         converter = getattr(policy, "converter_params", ActionConverterParams())
         params = HeadlessAgentParams(converter=converter)
         output = Path(output).expanduser()
+        strict_inputs = uses_standard_inputs(prepared, policy, record=record)
         # MetricsLogger claims the output/resume lock before any video is written.
         with MetricsLogger(output, prepared, resume=resume, accept_changes=tuple(accept_changes)) as logger:
             if wrap_env is not None:
@@ -118,6 +121,8 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
                 active_env = RecordingEnv(active_env, recorder)
             else:
                 agent = agent_class(policy, label_mapper, params, name=policy.name)
+                if strict_inputs:
+                    agent = StandardInputAgent(agent)
 
             def on_episode(index, total, row):
                 """The recorder's own hook, and the caller's, in that order.
@@ -149,4 +154,3 @@ def run_evaluation(env, policy, label_mapper, *, output, config, settings=None,
                 recorder.close()
         finally:
             active_env.close()
-

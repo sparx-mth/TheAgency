@@ -38,6 +38,7 @@ from sparx_agency.tasks.mapping.scene_graph.serve.contract import (
 )
 
 _TAG = "[scene-graph-detect]"
+_SCOPED_BACKENDS = ("yolo_world", "grounding_dino")
 
 
 class _ServerContext:
@@ -103,7 +104,7 @@ class _DetectionHandler(BaseHTTPRequestHandler):
         with ctx.lock:
             payload = {"ok": True, "model": ctx.model_name, "device": ctx.device,
                        "classes": list(ctx.classes), "metadata": dict(ctx.metadata),
-                       "frames_served": ctx.frames_served, "scoped_prompts": ctx.metadata.get("backend") == "yolo_world"}
+                       "frames_served": ctx.frames_served, "scoped_prompts": ctx.metadata.get("backend") in _SCOPED_BACKENDS}
         self._send_json(payload)
 
     def do_POST(self) -> None:  # noqa: N802 - http.server API
@@ -131,8 +132,8 @@ class _DetectionHandler(BaseHTTPRequestHandler):
             classes = list(ctx.classes)
             scoped = self.path == "/detect/scoped"
             if scoped:
-                if ctx.metadata.get("backend") != "yolo_world":
-                    raise ValueError("Request-scoped prediction requires YOLO-World")
+                if ctx.metadata.get("backend") not in _SCOPED_BACKENDS:
+                    raise ValueError("This detector backend does not support request-scoped prediction")
                 classes = json.loads(self.headers.get("X-Detection-Classes", "null"))
                 if (not isinstance(classes, list) or not classes or
                         any(not isinstance(c, str) or c not in ctx.classes for c in classes)

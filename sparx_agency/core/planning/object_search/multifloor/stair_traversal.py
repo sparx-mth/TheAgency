@@ -20,8 +20,9 @@ class StairTraversal:
     recovery explicitly halts; it never relabels a robot on stairs as searching.
     """
 
-    def __init__(self, coordinator, obs):
+    def __init__(self, coordinator, obs, *, first_floor=False):
         self.coordinator = coordinator
+        self.first_floor = first_floor
         self.policy, self.terrain, self.params = coordinator.policy, coordinator.terrain, coordinator.params
         self.portal = coordinator.active
         self.direction = self.portal["direction"]
@@ -90,7 +91,10 @@ class StairTraversal:
             return
         expected = self.portal.get("destination")
         atlas = self.policy.mapping.atlas
-        if expected is not None:
+        if self.first_floor:
+            # The first verified floor may be just one riser from the spawn tread.
+            destination = self.direction * (xyz[2] - self.source_height) >= -self.params.stable_height_m
+        elif expected is not None:
             destination = abs(xyz[2] - atlas.floors[expected].elevation_m) <= self.params.floor_match_m
         else:
             destination = self.direction * (xyz[2] - self.source_height) >= self.params.min_floor_separation_m

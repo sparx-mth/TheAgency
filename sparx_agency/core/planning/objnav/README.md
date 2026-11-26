@@ -11,6 +11,11 @@ localiser, no dynamics — so the numbers measure the search logic and nothing
 else. The method speaks continuous world geometry; the benchmark speaks six
 discrete actions; this package is the translation between them.
 
+In [MP3D standard-input mode](../../../tasks/planning/objnav_benchmark_runtime/mp3d/README.md#2-single-run--video-recording)
+the evaluator keeps the world pose. The agent and its converter share episodic
+planar GPS/compass and a height estimated by `RelativeHeight` from successive
+RGB-D frames, using only NumPy.
+
 ```text
  ObjNavEnv  (one adapter per benchmark branch)         HeadlessObjNavAgent  (this package)
  ─────────────────────────────────────────────         ─────────────────────────────────────────────

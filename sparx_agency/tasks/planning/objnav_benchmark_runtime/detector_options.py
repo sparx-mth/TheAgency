@@ -7,6 +7,8 @@ from sparx_agency.core.mapping.detection.registry import default_detection_regis
 #: YOLO-World only; Grounding DINO / BLIP-2 (``grounded_vlm``, ``hybrid``) stay
 #: selectable but are not the default -- their stair verification is deferred work.
 DEFAULT_DETECTOR_BACKEND = "yolo_world"
+# The strict MP3D comparison uses standalone RGB grounding, never YOLO or a hybrid.
+STANDARD_DETECTOR = "grounding_dino"
 
 #: ``--perception``: the served detector/segmenter (the benchmark), or the simulator's own annotations
 #: standing in for both (the perception upper bound; non-publishable).

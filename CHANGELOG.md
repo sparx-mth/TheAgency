@@ -5,6 +5,10 @@ All notable changes to this project are logged here. Format loosely follows
 future-you, not for a commit log.
 
 ## [Unreleased]
+### Fixed (2026-11-26, ObjectNav floor height and stair spawns)
+- MP3D standard-input runs estimate relative height from successive RGB-D frames and episodic planar odometry. The agent gets neither simulator altitude nor scene or episode identity; search uses RGB perception without YOLO.
+- Visual frontier search can walk off a provisional stair spawn to its first supported floor. It restarts warm-up and frontier view selection there without losing the episode's query count; later flights remain excluded.
+
 ### Added (2026-11-25, the full MP3D v1 val split on the RTX 4090 profile, VLM frontier search under ground-truth perception)
 - `mp3d/results/mp3d_v1_val_4090/`: 2,195 of 2,195 episodes, `complete: true`, SR 0.632 / SPL 0.296 / DTG 4.08 m
   with `qwen2.5vl:7b`; an upper bound under ideal perception, not a publishable result. `analysis.md` reads the

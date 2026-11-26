@@ -62,12 +62,13 @@ class RPTSettings:
             by default: the single-storey configuration searches the storey
             the agent starts on (multi-storey search is not part of it yet),
             so a staircase is never the exploration
-            fallback's last resort, never committed or climbed, and an
-            unplanned height departure starts no traversal; every seen
+            fallback's last resort on a confirmed storey. A provisional stair
+            spawn may first walk off its flight to establish that storey;
+            the visual policy never switches to the opposite end later. Every seen
             staircase and every observed drop below the storey plane is
             impassable for frontiers, openings, peeks and routes, and no goal
             off the spawn plane is accepted (``core/planning/object_search/multifloor/spawn_floor_guard.py``).
-            ``True`` restores the multi-storey search exactly as before.
+            ``True`` enables multi-storey search in the room policy only.
         floor_plane_bound_m: With stair traversal forbidden, how far the
             storey the agent stands on may lie from the spawn height before
             every goal on it is refused -- the ``Z_spawn +/- 0.5 m`` plane.

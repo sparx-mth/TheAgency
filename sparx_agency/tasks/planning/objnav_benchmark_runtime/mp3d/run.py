@@ -13,7 +13,7 @@ is MP3D's is the label table and the protocol's body (height and radius).
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import os
 from pathlib import Path
@@ -21,7 +21,7 @@ import subprocess
 
 from sparx_agency.core.planning.objnav.labels.datasets.mp3d import mp3d_label_mapper
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import (
-    PERCEPTION_GROUND_TRUTH, add_detector_options)
+    PERCEPTION_GROUND_TRUTH, STANDARD_DETECTOR, add_detector_options)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.policy_factory import (  # noqa: F401  (StopDiagnostic re-exported for the sibling CLIs)
     AGENT_CHOICES, AGENT_HELP, StopDiagnostic, build_policy, detector_vocabulary)
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (
@@ -32,6 +32,7 @@ from sparx_agency.tasks.planning.objnav_benchmark_runtime.provenance import (
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.entrypoint import (  # noqa: F401  (re-exported)
     RESUMABLE_CONFIG_CHANGES, RUNTIME_PACKAGES, geodesic_agreement_issue, gpu_gate, method_defaults, oracle_alive,
     run_main, runtime_record)
+from sparx_agency.tasks.planning.objnav_benchmark_runtime.habitat.standard_inputs import STANDARD_INPUTS
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.dataset import CATEGORIES, MP3DDataset
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.env import MP3DEnv
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.mp3d.protocol import (
@@ -66,6 +67,10 @@ def parser():
     # The detector and the (off by default) segmenter: the same switches as gibson.run
     # and hm3d.run, so a campaign forwards one set of perception flags to any benchmark.
     add_detector_options(p, url_default=DEFAULT_DETECTOR_URL)
+    p.add_argument("--standard-inputs", action="store_true",
+                   help="Only RGB, clipped depth, object category, episodic 2-D GPS and compass; "
+                        "no world pose, altitude, episode identity, oracle, YOLO or replay. "
+                        "Search requires --detector-backend %s" % STANDARD_DETECTOR)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--gpu-device", type=int, default=0)
     p.add_argument("--limit", type=int)
@@ -199,6 +204,18 @@ def prepare(args):
     if args.record_log_only:
         args.record = True          # the log-only recording is a recording without its video
     protocol = protocol_for(args.version).with_split(args.split)
+    standard_inputs = getattr(args, "standard_inputs", False)
+    if standard_inputs:
+        # A zero raw return and a below-minimum depth have the same published depth value.
+        protocol = replace(protocol, depth_hole_fill=False)
+        if args.perception == PERCEPTION_GROUND_TRUTH or os.environ.get("LLM_ANSWERS_REPLAY"):
+            issues.append("--standard-inputs forbids ground-truth perception and answer replay")
+        if args.agent == "falcon-yolo" or (args.agent != "stop" and args.detector_backend != STANDARD_DETECTOR):
+            issues.append("--standard-inputs forbids YOLO; use --detector-backend %s for search" % STANDARD_DETECTOR)
+        if args.record or os.environ.get("OBJNAV_FRAME_LOG_DIR") or os.environ.get("LLM_ANSWERS_RECORD"):
+            issues.append("--standard-inputs uses anonymous episode IDs: use in-memory frames and no recordings")
+        if issues:
+            return None, None, mp3d_label_mapper(), {}, issues  # before opening a scene or probing any service
     development = protocol.split != "val"
     subset = bool(args.scenes or args.limit or args.shards > 1 or development
                   or args.episodes_per_scene or args.category or args.episode_ids)
@@ -347,6 +364,10 @@ def prepare(args):
             if env.navmesh_by_scene:
                 config["navmesh_by_scene"] = dict(sorted(env.navmesh_by_scene.items()))
     config["selected_episode_ids"] = list(ids)
+    if standard_inputs:
+        from sparx_agency.core.planning.objnav.relative_height import RelativeHeight
+        config["policy_inputs"] = STANDARD_INPUTS
+        config["policy_height_estimator"] = RelativeHeight.NAME
     if oracle:
         # Only the oracle's record carries the key, as on HM3D: a service run's config stays what it was.
         config["perception"] = PERCEPTION_GROUND_TRUTH

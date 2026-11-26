@@ -5,7 +5,7 @@ A `SearchPolicy` for the ObjectNav contract in
 pose, find a named object category in an unseen home with a discrete action
 set, and STOP inside the success region. The live RPT policy scores reachable
 frontiers from boxed RGB views, orders those nodes with RPT\*, and follows the
-selected goal with A\*. The detector's target closing has priority. Training-free, and
+selected goal with A\*. On a floor, the detector's target closing has priority. Training-free, and
 given no simulator geometry: no navmesh, no pathfinder, no storey or stair
 annotations (see "No privileged geometry" below).
 
@@ -16,7 +16,7 @@ annotations (see "No privileged geometry" below).
                                              world_model/  per-storey log-odds occupancy, sight ledger, stair surfaces
                                              frontier_views/  reachable clusters → sticky nodes → boxed frames → VLM probability → RPT*
                                              exploration/  geometry-only warm-up, glances, fallback and escape
-                                             multifloor/   measured treads, drop masks and retreat; no portal destinations
+                                             multifloor/   recover from a stair spawn; avoid later flights and drops
                                              closing/      the target takeover: verify, approach, pitch, STOP
                                              navigation/   the route as the exact actions that walk it (lattice), doorway scrapes, the look-down
                                              frame_log/    every decided RGB frame under its capture pose (RAM by default, disk optional)
@@ -41,6 +41,17 @@ motion or a STOP. RGB can show what lies **beyond** a frontier at the camera's
 outlined; it never extends the measured floor. An RGB target without usable
 depth can start a bounded, clearance-checked bearing approach in `TargetClosing`,
 but cannot establish a metric target or a STOP until measured.
+
+If measured treads surround a small provisional spawn platform, or the agent
+leaves the spawn height before confirming a floor, the visual arm suspends
+target closing and frontier scoring. It surveys the footing, follows the
+nearer measured flight on body-clear support, and starts a fresh warm-up
+and frontier view history on the first supported floor. Attempts and
+retreats are bounded; exhausted recovery on an observed flight is a safety
+halt, not a target sighting. The visual arm never takes the legacy room
+policy's later switch to the opposite storey.
+In [MP3D standard-input mode](../../../tasks/planning/objnav_benchmark_runtime/mp3d/README.md#2-single-run--video-recording),
+the height used here is relative to the start and estimated from RGB-D, not read from the simulator.
 
 `--agent rpt_room_llm` selects [`LegacyRoomSearchPolicy`](rooms/legacy_policy.py):
 the full detector vocabulary, object and door landmarks, watershed, room names,

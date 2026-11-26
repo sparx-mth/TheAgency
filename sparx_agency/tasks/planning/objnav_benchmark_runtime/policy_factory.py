@@ -39,7 +39,7 @@ import json
 from sparx_agency.core.planning.objnav.types.command import NavigationCommand
 from sparx_agency.core.planning.object_search.perception.target_prompts import target_stair_prompts
 from sparx_agency.tasks.planning.objnav_benchmark_runtime.detector_options import (
-    PERCEPTION_GROUND_TRUTH, PERCEPTION_SERVICE)
+    PERCEPTION_GROUND_TRUTH, PERCEPTION_SERVICE, STANDARD_DETECTOR)
 
 #: The ``--agent`` choices every adapter CLI offers, and what each is.
 AGENT_CHOICES = ("rpt", "rpt_room_llm", "falcon-yolo", "stop")
@@ -186,8 +186,9 @@ def build_policy(args, label_mapper, defaults=None, ground_truth=None):
             raise ValueError("--ground-truth-min-pixels is the oracle's; --perception is %r" % (args.perception,))
         if getattr(args, "ground_truth_on_object_m", None) is not None:
             raise ValueError("--ground-truth-on-object-m is the oracle's; --perception is %r" % (args.perception,))
-        if visual and args.detector_backend != "yolo_world":
-            raise ValueError("--agent rpt requires YOLO-World or ground-truth perception for episode-specific prompts")
+        scoped_backend = STANDARD_DETECTOR if getattr(args, "standard_inputs", False) else "yolo_world"
+        if visual and args.detector_backend != scoped_backend:
+            raise ValueError("--agent rpt requires %s for episode-specific service prompts in this input mode" % scoped_backend)
         detector = HttpDetector(public_service_url(args.detector_url), detector_vocabulary(args.agent, label_mapper),
                                 expected_backend=args.detector_backend,
                                 timeout_s=getattr(args, "detector_timeout_s", 30.0), **({"episode_scoped": True} if visual else {}))

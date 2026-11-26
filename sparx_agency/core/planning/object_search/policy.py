@@ -437,9 +437,12 @@ class _ObservedSearchPolicy:
             # frame that cannot be kept ends the run (``FrameLogError``) instead of leaving a hole in the memory.
             self.frame_log.add(observation)
         self.perception.observe(observation)
-        self.closing.observe(observation)
+        spawn_priority = False
         if not self.uses_room_loop and self.building:
             self.building.prepare_observation(observation)  # also measure treads while closing or following an RGB bearing
+            spawn_priority = self._spawn_priority(observation)
+        if not spawn_priority:
+            self.closing.observe(observation)
         if self.closing.active:
             if self.uses_room_loop:
                 self.pursuit.notify_takeover(observation)
@@ -493,6 +496,9 @@ class _ObservedSearchPolicy:
         self.last_world = world
         if self.building:
             self.building.observe(observation)
+        if spawn_priority:
+            self._action_owner = "spawn_recovery"
+            return self.building.visual_spawn_command(observation)
         if not self.building or not self.building.traversing:
             self.telemetry.observe(observation, world, self.mapping.floor_id)
             self.sight.observe(observation, world)
@@ -725,8 +731,26 @@ class RPTSearchPolicy(_ObservedSearchPolicy):
         if configure is not None:
             configure(target_stair_prompts(self.target))
         self.frontiers = FrontierSearch(self)
+        self._spawn_paused = False
         self._retired_by_floor = {}
         self._change_floor(None)
+
+    def _spawn_priority(self, obs):
+        pending = self.building.visual_spawn_pending(obs)
+        if pending and not self._spawn_paused:
+            if self.closing.active:
+                self.closing.interrupt_for_spawn(obs)
+            self.glances.abort(obs, "stair_spawn")
+            self.camera_control.inspection = None
+            self.route_memory.clear("stair_spawn")
+            self._route = self._goal = None
+        elif self._spawn_paused and not pending:
+            # A nearby landing can have the same floor id and be within the frame selector's height band.
+            self.frontiers = FrontierSearch(self, first_frame=obs.step, prior_calls=self.frontiers.calls)
+            self._retired_by_floor.clear()
+            self._change_floor(obs)
+        self._spawn_paused = pending
+        return pending
 
     def _plan(self, observation):
         # The Habitat adapter uses +inf for a clipped far pixel. Don't let another
@@ -783,6 +807,8 @@ class RPTSearchPolicy(_ObservedSearchPolicy):
     def filter_action(self, observation, action):
         # Direct closing/inspection steps do not always have an A* path. The measured
         # stair/drop exclusion applies to them too. A trail retreat returns to the storey.
+        if self._action_owner == "spawn_recovery" and self.building.transition is not None:
+            return self.building.filter_action(observation, action)  # measured tread support, not the frozen floor grid
         retreat = self.building and self.building.retreating and not self.closing.active
         if action == DiscreteAction.MOVE_FORWARD and not retreat:
             world, guard = self.last_world, self.floor_guard
@@ -796,7 +822,8 @@ class RPTSearchPolicy(_ObservedSearchPolicy):
 
     def configuration(self):
         return {**super().configuration(), "frame_log": self.frame_log.describe(),
-                "detector_scope": "episode target aliases + stairs", "floor_change_decision": "none: avoidance only",
+                "detector_scope": "episode target aliases + stairs",
+                "floor_change_decision": "recover a provisional stair spawn; avoid subsequent flights",
                 "perception_fusion": "target-only depth in TargetClosing; RGB-only bearing until depth is valid",
                 "frontier_search": {"nodes": asdict(NodeSettings()), "views": asdict(ViewSettings()),
                                     "prompt": PROMPT_VERSION, "valuation": "one independent probability per node"}}

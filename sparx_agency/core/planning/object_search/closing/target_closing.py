@@ -1699,6 +1699,10 @@ class TargetClosing:
         floor = self.policy.mapping.floor_id
         return any(f == floor and math.dist(xy, here) <= self.settings.boxed_in_radius_m for xy, f, _ in self.boxed_in)
 
+    def interrupt_for_spawn(self, obs):
+        """Discard the tread's target lock without recording negative evidence about the object."""
+        self._release(obs, why="recovering provisional stair spawn", remember=False)
+
     def _release(self, obs, radius_factor=1.0, why="unverified", remember=True):
         """Give a candidate back to exploration and remember the spot (``radius_factor`` times the rejection radius).
 

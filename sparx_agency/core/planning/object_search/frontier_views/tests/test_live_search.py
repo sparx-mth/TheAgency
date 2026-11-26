@@ -137,3 +137,18 @@ def test_first_frame_on_a_new_floor_starts_a_new_rotation_and_scores_only_that_f
     assert set(p.frontiers.nodes).isdisjoint(old_ids)
     assert all(p.frontiers.ledger.nodes[i].frames == ("step_000001.jpg",) for i in p.frontiers.nodes)
     assert len(model.questions) == 4 and p.solver.calls == 1
+
+
+def test_stair_handoff_keeps_calls_but_cannot_score_from_pre_landing_frames(monkeypatch):
+    p, ep, model = two_gaps(monkeypatch, [0.3] * 4)
+    p.plan(frame(ep, 0, depth=np.nan))
+    assert p.frontiers.calls == 2
+    monkeypatch.setattr(p.building, "visual_spawn_pending", lambda obs: obs.step == 1)
+    p.plan(frame(ep, 1, depth=np.nan))
+    # Even at the same elevation, the pre-landing frame facing the gaps is ineligible.
+    p.plan(frame(ep, 2, depth=np.nan, pose=pose(0, 0, yaw_deg=180)))
+    assert p.frontiers.first_frame == 2 and p.frontiers.calls == len(model.questions) == 2
+    assert not p.frontiers.scores
+    p.plan(frame(ep, 3, depth=np.nan))
+    assert p.frontiers.calls == len(model.questions) == 4
+    assert {r.frames for r in p.frontiers.ledger.nodes.values()} == {("step_000003.jpg",)}

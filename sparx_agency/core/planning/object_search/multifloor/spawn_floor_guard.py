@@ -398,6 +398,12 @@ class SpawnFloorGuard:
         match_m = float(self.policy.settings.multifloor.floor_match_m)
         known = [f for f in atlas.floors.values() if abs(f.elevation_m - float(height)) <= match_m]
         building = getattr(self.policy, "building", None)
+        if building is not None and building.confinement_only and building.transition is not None:
+            # Mid-flight, a momentarily level patch must not start frontier search. Keep the bounded return
+            # to the source tread for a failed attempt, but require the traversal's verified exit elsewhere.
+            at_source = known and abs(float(obs.pose.z) - atlas.elevation_m) <= atlas.params.stable_height_m
+            if not at_source and not building.transition.arrival_allowed:
+                return
         if building is not None and getattr(building.switch, "state", None) == "traverse":
             # The spawn switch arrives by its own rule (``spawn_switch.accept_arrival``) or retreats: every floor
             # known when it set off is one it left, and settling on the spawn's own tread on the way past took
