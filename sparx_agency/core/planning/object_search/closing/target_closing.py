@@ -25,6 +25,7 @@ from sparx_agency.core.mapping.objects.support_surface import (
 from sparx_agency.core.planning.object_search.closing.target_backoff import BackoffManeuver
 from sparx_agency.core.planning.object_search.perception.target_context import suspect
 from sparx_agency.core.mapping.tracking.target_memory_3d import TargetMemory3D
+from sparx_agency.core.planning.object_search.closing.bearing_followup import BearingFollowup
 from sparx_agency.core.planning.object_search.closing.target_path import TargetApproachPath
 
 
@@ -115,6 +116,7 @@ class TargetClosingSettings:
     # cut edge) and the body faced to the box's bearing, so the next frame shows the object whole and the
     # ordinary start -- a projection, or a whole depthless box -- is judged on it; the bearing's bounds, its
     # two-frame persistence rule and its retry memory apply unchanged. False restores the silent drop.
+    bearing_followup: bool = False
     bearing_start: bool = True
     bearing_clipped: bool = True
     bearing_max_actions: int = 16
@@ -564,6 +566,8 @@ class TargetClosingSettings:
     support_surface_classes: tuple = SUPPORT_SURFACE_CLASSES
 
     def __post_init__(self):
+        if type(self.bearing_followup) is not bool:
+            raise ValueError('bearing_followup must be boolean')
         if isinstance(self.confidence, bool) or not math.isfinite(self.confidence) or not 0 < self.confidence <= 1:
             raise ValueError("Target confidence must be in (0, 1]")
         if (isinstance(self.track_confidence, bool) or not math.isfinite(self.track_confidence)
@@ -834,6 +838,7 @@ class TargetClosing:
         self.bearing_failures = []         # (robot xy, floor id, action) per bearing approach given up
         self._depthless = []               # this frame's strong, whole boxes of the class with no usable depth
         self._in_frame = []                # this frame's whole boxes of the class at the threshold in force
+        self.followups_started = 0
         self._standing = None              # this action's standing floors, by clearance (``standing_floor``)
         self._clear()
 
@@ -893,6 +898,7 @@ class TargetClosing:
         self.sweep_actions = 0             # consecutive verification actions spent sweeping for a candidate out of view
         self.stop_approach = None          # the decided STOP's walk to the stop distance in progress (``_terminal``), else None
         self.stop_decision = None          # what both stop measures read on the frame the STOP was decided (the record's)
+        self.followup = None
         self.bearing = None                # the BEARING approach in force (an RGB box without depth): its box, yaw, counts
 
     def standing_floor(self, obs, world, standoff_m=None):
@@ -1260,6 +1266,9 @@ class TargetClosing:
             if projected:
                 # The step closer gave the box its depth: the verification begins HERE, on this
                 # frame, with a clock of its own (the bearing steps were not verification actions).
+                if self.followup is not None:
+                    self.followup.end(p, "fresh target depth")
+                    self.followup = None
                 self.bearing_resolved += 1
                 self.bearing = None
                 self.active = False
@@ -1502,6 +1511,8 @@ class TargetClosing:
         b, s, p = self.bearing, self.settings, self.policy
         if p.mapping.floor_id != self.floor_id:
             return self._end_bearing(obs, "storey changed")
+        if self.followup is not None:
+            return  # alternate view has its own deadline, not the exhausted direct-bearing budget
         if self._in_frame:
             best = max(self._in_frame, key=lambda d: d.conf)
             b.update(last_seen=int(obs.step), box=tuple(best.xyxy), conf=float(best.conf), lost=0,
@@ -1528,6 +1539,18 @@ class TargetClosing:
     def _end_bearing(self, obs, why):
         """Give the bearing approach up: no rejection memory (nothing was placed), the spot remembered, the search resumes."""
         b = self.bearing
+        if (self.target_only and self.settings.bearing_followup and self.followup is None
+                and self.floor_id == self.policy.mapping.floor_id and b["conf"] >= self.settings.confidence
+                and obs.step + 2 < self.policy.episode.max_steps
+                and why.startswith(("lost:", "out of actions", "walked", "not moving", "no safe observed step"))):
+            self.followup = BearingFollowup(self, obs)
+            self.followups_started += 1
+            self.phase = "BEARING_FOLLOWUP"
+            return
+        if self.followup is not None:
+            self.followup.end(self.policy, why)
+            if self.floor_id == self.policy.mapping.floor_id:
+                self.bearing_failures.append(((obs.pose.x, obs.pose.y), self.floor_id, int(obs.step)))
         self.bearing_abandoned += 1
         self.bearing_failures.append((tuple(b["spot"]), self.policy.mapping.floor_id, int(obs.step)))
         pursuit = getattr(self.policy, "pursuit", None)
@@ -2137,6 +2160,12 @@ class TargetClosing:
             self.fail(self.failure)
         if self.stop_approach is not None:
             return self._stop_approach_step(obs)
+        if self.followup is not None:
+            command = None if self.blind() else self.followup.command(self, obs, world)
+            if command is not None:
+                return command
+            self._end_bearing(obs, "alternate bearing view ended without depth")
+            return NavigationCommand.hold(final_yaw=obs.pose.yaw, info={"kind": "target_released"})
         if self.blind():
             return self._blind_frame(obs, world)
         if self.bearing is not None:
@@ -3091,6 +3120,7 @@ class TargetClosing:
     def diagnostics(self):
         return {"active": self.active, "locked": self.locked, "phase": self.phase,
                 "bearing": None if self.bearing is None else {k: v for k, v in self.bearing.items() if k != "moves"},
+                "bearing_followups_started": self.followups_started,
                 "bearing_starts": self.bearing_starts, "bearing_resolved": self.bearing_resolved,
                 "bearing_abandoned": self.bearing_abandoned, "bearing_refusals": self.bearing_refusals,
                 "bearing_clipped_starts": self.bearing_clipped_starts,

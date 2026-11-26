@@ -55,13 +55,15 @@ REPLAY_ENV = "LLM_ANSWERS_REPLAY"
 
 def request_key(backend: str, model: str, system: str, user: str, temperature: float, seed: Optional[int],
                 num_ctx: Optional[int], max_tokens: int, response_format: str = "json",
-                scope: Optional[str] = None, image_sha256: Optional[str] = None) -> str:
+                scope: Optional[str] = None, image_sha256: Optional[str] = None, think: Optional[bool] = None) -> str:
     """SHA-256 of the scope and the request's answer-shaping fields, canonically serialised."""
     fields = {"scope": scope, "backend": backend, "model": model, "system": system, "user": user,
               "temperature": float(temperature), "seed": seed, "num_ctx": None if num_ctx is None else int(num_ctx),
               "max_tokens": int(max_tokens), "format": response_format}
     if image_sha256 is not None:         # keep historical text-only replay keys unchanged
         fields["image_sha256"] = image_sha256
+    if think is not None:                # keep historical image keys when using the server default
+        fields["think"] = think
     canonical = json.dumps(fields, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

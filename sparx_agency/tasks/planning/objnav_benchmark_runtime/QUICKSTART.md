@@ -124,6 +124,9 @@ The **weight precision comes from the model tag**, not a client-side dtype cast.
 The launcher records the server's digest and reported quantization. It requests a
 256-token prefill batch, a 4096-token window and a 32-token JSON reply. Each request
 contains one JPEG with at most three boxed views (640 px maximum long edge each).
+For thinking-enabled Ollama models such as Gemma 4, set `LLM_VISION_THINK=0`
+so the 32 tokens are available for the probability rather than hidden reasoning.
+Unset preserves the original model behavior and replay keys.
 The default is one in-flight request per server and one loaded model. More workers
 share that model; they do not automatically multiply its KV caches. Keep the default
 of one server on a single card. Flash attention enables Ollama's Q8 KV cache; for a

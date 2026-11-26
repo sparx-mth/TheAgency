@@ -295,6 +295,27 @@ def test_multimodal_request_carries_the_actual_jpeg_and_bounded_options(backend)
         prefix, encoded = image["image_url"]["url"].split(",")
         assert prefix == "data:image/jpeg;base64"
     assert payload["model"] == "vl" and base64.b64decode(encoded) == jpeg
+    assert "think" not in payload
+
+
+def test_only_ollama_image_requests_opt_into_a_thinking_mode(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "ollama")
+    monkeypatch.setenv("LLM_VISION_THINK", "0")
+    assert LLMConfig.from_env().vision_think is None
+    cfg = LLMConfig.from_env(vision=True)
+    assert cfg.vision_think is False
+    client = _client("ollama", [_ollama_reply("{}"), _ollama_reply("{}")], vision_think=cfg.vision_think)
+    client.chat_json("s", "image", image_jpeg=b"pixels")
+    client.chat_json("s", "text")
+    assert client.sess.posts[0]["payload"]["think"] is False
+    assert "think" not in client.sess.posts[1]["payload"]
+    monkeypatch.setenv("LLM_VISION_THINK", "1")
+    assert LLMConfig.from_env(vision=True).vision_think is True
+    monkeypatch.setenv("LLM_VISION_THINK", "typo")
+    with pytest.raises(ValueError, match="LLM_VISION_THINK"):
+        LLMConfig.from_env(vision=True)
+    monkeypatch.setenv("LLM_BACKEND", "openai-compat")
+    assert LLMConfig.from_env(vision=True).vision_think is None
 
 
 def test_temperature_override_per_call():
